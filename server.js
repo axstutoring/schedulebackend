@@ -384,7 +384,7 @@ app.post('/feed/new', async (req, res) => {
     {
         const message = "Dear " + req.body.member + ",\n\n" + "A tutoring account has been created under the email " + req.body.email +
         ". Your temporary password is " + idString.substring(idString.length - 6, idString.length) + " which can be changed by logging"
-        + " into https://kevintangprogram.github.io/schedule, clicking 'modify schedule', and entering a password at the bottom of the page.\n"
+        + " into https://axstutoring.github.io/schedule, clicking 'modify schedule', and entering a password at the bottom of the page.\n"
         + "\nSincerely,\n" + tutoringChairs;
 
         const options = {
@@ -521,7 +521,7 @@ app.put('/feed/edit/:id', async (req, res) => {
 
     if (req.body.notify === '1')
     {
-        const message = "Dear " + req.body.member + ",\n\n" + "The informtion pertaining to your tutoring account under the email " 
+        const message = "Dear " + req.body.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
         + req.body.email + " has been modified.\n"
         + "\nSincerely,\n" + tutoringChairs;
 
@@ -833,7 +833,7 @@ app.put('/feed/edit/:id', async (req, res) => {
         if (req.body.notify === '1')
         {
             const memberObject = await Post.findById(id);
-            const message = "Dear " + memberObject.member + ",\n\n" + "The informtion pertaining to your tutoring account under the email " 
+            const message = "Dear " + memberObject.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
             + memberObject.email + " has been modified. Please check at your earliest convenience to see the changes.\n"
             + "\nSincerely,\n" + tutoringChairs;
 
@@ -892,7 +892,7 @@ app.delete('/feed/delete/:id', async (req, res) => {
         }
         if (req.query.notify === '1')
         {
-            const message = "Dear " + post.member + ",\n\n" + "The informtion pertaining to your tutoring account under the email " 
+            const message = "Dear " + post.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
             + post.email + " has been deleted.\n"
             + "\nSincerely,\n" + tutoringChairs;
 

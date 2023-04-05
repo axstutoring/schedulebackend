@@ -964,7 +964,7 @@ app.delete('/feed/delete/:id', async (req, res) => {
     {
         if (req.query.checkedList[i] === 'true')
         {
-            if (courseList[i].course === req.query.course[i])
+            if (courseList[i].course === req.query.course[i].replace("(-)", ""))
             {
                 const post = await Course.findByIdAndDelete(courseList[i]._id);
                 for (let k = 0; k < memberList.length; k++)
@@ -980,7 +980,7 @@ app.delete('/feed/delete/:id', async (req, res) => {
             {
                 for (let j = 0; j < courseList.length; j++)
                 {
-                    if (courseList[j].course === req.query.course[i])
+                    if (courseList[j].course === req.query.course[i].replace("(-)", ""))
                     {
                         const post = await Course.findByIdAndDelete(courseList[j]._id);
                         for (let k = 0; k < memberList.length; k++)
@@ -1285,6 +1285,35 @@ app.get('/course', async (req, res) => {
     for (let i = 0; i < feed.length; i++)
     {
         returnArray[i] = feed[i].course;
+    }
+    res.json(returnArray);
+})
+
+app.get('/get/course/delete', async (req, res) => {
+    const feed = await Course.find();
+    let returnArray = new Array(feed.length);
+    for (let i = 0; i < feed.length; i++)
+    {
+        returnArray[i] = feed[i].course;
+    }
+
+    const feed2 = await Post.find();
+
+    for (let i = 0; i < feed.length; i++)
+    {
+        let flag = true;
+        for (let j = 0; j < feed2.length; j++)
+        {
+            if (feed2[j].subject.includes(returnArray[i]))
+            {
+                flag = false;
+                break;
+            }
+        }
+        if (flag)
+        {
+            returnArray[i] += '(-)';
+        }
     }
     res.json(returnArray);
 })

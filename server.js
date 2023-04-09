@@ -715,158 +715,160 @@ app.put('/feed/edit/:id', async (req, res) => {
         dateArray[1] = Date.parse(req.body.monthEnd + " " + dayEndNum + ", " + futureYear.toString());
     }
 
-    const id = req.params.id;
-  
-    try {
-        if (req.body.email !== "")
+    try
+    {
+        for (let i = 1; i < req.body.identification.length; i+=26)
         {
-            const memberObject = await Post.findById(id);
-            const post = await Post.findByIdAndUpdate(id, {
-                member: memberObject.member,
-                email: req.body.email,
-                phone: memberObject.phone,
-                subject: memberObject.subject,
-                availability: memberObject.availability,
-                off: memberObject.off,
-                maximumHours: memberObject.maximumHours,
-                authorization: memberObject.authorization,
-                password: memberObject.password,
-            }, { new: true });
-            post.save();
+            const id = req.body.identification.substring(i, i + 24);
+            if (req.body.email !== "")
+            {
+                const memberObject = await Post.findById(id);
+                const post = await Post.findByIdAndUpdate(id, {
+                    member: memberObject.member,
+                    email: req.body.email,
+                    phone: memberObject.phone,
+                    subject: memberObject.subject,
+                    availability: memberObject.availability,
+                    off: memberObject.off,
+                    maximumHours: memberObject.maximumHours,
+                    authorization: memberObject.authorization,
+                    password: memberObject.password,
+                }, { new: true });
+                post.save();
+            }
+            if (req.body.phone !== 0)
+            {
+                const memberObject = await Post.findById(id);
+                const post = await Post.findByIdAndUpdate(id, {
+                    member: memberObject.member,
+                    email: memberObject.email,
+                    phone: req.body.phone,
+                    subject: memberObject.subject,
+                    availability: memberObject.availability,
+                    off: memberObject.off,
+                    maximumHours: memberObject.maximumHours,
+                    authorization: memberObject.authorization,
+                    password: memberObject.password,
+                }, { new: true });
+                post.save();
+            }
+            if (courseList !== "")
+            {
+                const memberObject = await Post.findById(id);
+                const post = await Post.findByIdAndUpdate(id, {
+                    member: memberObject.member,
+                    email: memberObject.email,
+                    phone: memberObject.phone,
+                    subject: courseList,
+                    availability: memberObject.availability,
+                    off: memberObject.off,
+                    maximumHours: memberObject.maximumHours,
+                    authorization: memberObject.authorization,
+                    password: memberObject.password,
+                }, { new: true });
+                post.save();
+            }
+            if (availabilityList !== "")
+            {
+                const memberObject = await Post.findById(id);
+                const post = await Post.findByIdAndUpdate(id, {
+                    member: memberObject.member,
+                    email: memberObject.email,
+                    phone: memberObject.phone,
+                    subject: memberObject.subject,
+                    availability: availabilityList,
+                    off: memberObject.off,
+                    maximumHours: memberObject.maximumHours,
+                    authorization: memberObject.authorization,
+                    password: memberObject.password,
+                }, { new: true });
+                post.save();
+            }
+            if (req.body.maximumHours !== -1)
+            {
+                const memberObject = await Post.findById(id);
+                const post = await Post.findByIdAndUpdate(id, {
+                    member: memberObject.member,
+                    email: memberObject.email,
+                    phone: memberObject.phone,
+                    subject: memberObject.subject,
+                    availability: memberObject.availability,
+                    off: memberObject.off,
+                    maximumHours: req.body.maximumHours,
+                    authorization: memberObject.authorization,
+                    password: memberObject.password,
+                }, { new: true });
+                post.save();
+            }
+            if (dateArray[0] !== 0)
+            {
+                const memberObject = await Post.findById(id);
+                const post = await Post.findByIdAndUpdate(id, {
+                    member: memberObject.member,
+                    email: memberObject.email,
+                    phone: memberObject.phone,
+                    subject: memberObject.subject,
+                    availability: memberObject.availability,
+                    off: dateArray,
+                    maximumHours: memberObject.maximumHours,
+                    authorization: memberObject.authorization,
+                    password: memberObject.password,
+                }, { new: true });
+                post.save();
+            }
+            if (req.body.password !== "")
+            {
+                const memberObject = await Post.findById(id);
+                const post = await Post.findByIdAndUpdate(id, {
+                    member: memberObject.member,
+                    email: memberObject.email,
+                    phone: memberObject.phone,
+                    subject: memberObject.subject,
+                    availability: memberObject.availability,
+                    off: memberObject.off,
+                    maximumHours: memberObject.maximumHours,
+                    authorization: memberObject.authorization,
+                    password: (crypto.SHA256(req.body.password + id.toString())).toString(),
+                }, { new: true });
+                post.save();
+            }
+            if (req.body.notify === '1')
+            {
+                const memberObject = await Post.findById(id);
+                const message = "Dear " + memberObject.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
+                + memberObject.email + " has been modified. Please check at your earliest convenience to see the changes.\n"
+                + "\nSincerely,\n" + tutoringChairs;
+    
+                const options = {
+                    from: "axstutoring@zohomail.com",
+                    to: memberObject.email,
+                    subject: "AXS Tutoring - Account Modification",
+                    text: message,
+                };
+                
+                await new Promise((resolve, reject) => {
+                    transporter.sendMail(options, function (err, info){
+                        if (err)
+                        {
+                            reject(err);
+                        }
+                        else
+                        {
+                            resolve("email sent");
+                        }
+                        //console.log("Sent", info.response);
+                    });
+                })
+            }
         }
-        if (req.body.phone !== 0)
-        {
-            const memberObject = await Post.findById(id);
-            const post = await Post.findByIdAndUpdate(id, {
-                member: memberObject.member,
-                email: memberObject.email,
-                phone: req.body.phone,
-                subject: memberObject.subject,
-                availability: memberObject.availability,
-                off: memberObject.off,
-                maximumHours: memberObject.maximumHours,
-                authorization: memberObject.authorization,
-                password: memberObject.password,
-            }, { new: true });
-            post.save();
-        }
-        if (courseList !== "")
-        {
-            const memberObject = await Post.findById(id);
-            const post = await Post.findByIdAndUpdate(id, {
-                member: memberObject.member,
-                email: memberObject.email,
-                phone: memberObject.phone,
-                subject: courseList,
-                availability: memberObject.availability,
-                off: memberObject.off,
-                maximumHours: memberObject.maximumHours,
-                authorization: memberObject.authorization,
-                password: memberObject.password,
-            }, { new: true });
-            post.save();
-        }
-        if (availabilityList !== "")
-        {
-            const memberObject = await Post.findById(id);
-            const post = await Post.findByIdAndUpdate(id, {
-                member: memberObject.member,
-                email: memberObject.email,
-                phone: memberObject.phone,
-                subject: memberObject.subject,
-                availability: availabilityList,
-                off: memberObject.off,
-                maximumHours: memberObject.maximumHours,
-                authorization: memberObject.authorization,
-                password: memberObject.password,
-            }, { new: true });
-            post.save();
-        }
-        if (req.body.maximumHours !== -1)
-        {
-            const memberObject = await Post.findById(id);
-            const post = await Post.findByIdAndUpdate(id, {
-                member: memberObject.member,
-                email: memberObject.email,
-                phone: memberObject.phone,
-                subject: memberObject.subject,
-                availability: memberObject.availability,
-                off: memberObject.off,
-                maximumHours: req.body.maximumHours,
-                authorization: memberObject.authorization,
-                password: memberObject.password,
-            }, { new: true });
-            post.save();
-        }
-        if (dateArray[0] !== 0)
-        {
-            const memberObject = await Post.findById(id);
-            const post = await Post.findByIdAndUpdate(id, {
-                member: memberObject.member,
-                email: memberObject.email,
-                phone: memberObject.phone,
-                subject: memberObject.subject,
-                availability: memberObject.availability,
-                off: dateArray,
-                maximumHours: memberObject.maximumHours,
-                authorization: memberObject.authorization,
-                password: memberObject.password,
-            }, { new: true });
-            post.save();
-        }
-        if (req.body.password !== "")
-        {
-            const memberObject = await Post.findById(id);
-            const post = await Post.findByIdAndUpdate(id, {
-                member: memberObject.member,
-                email: memberObject.email,
-                phone: memberObject.phone,
-                subject: memberObject.subject,
-                availability: memberObject.availability,
-                off: memberObject.off,
-                maximumHours: memberObject.maximumHours,
-                authorization: memberObject.authorization,
-                password: (crypto.SHA256(req.body.password + id.toString())).toString(),
-            }, { new: true });
-            post.save();
-        }
-        if (req.body.notify === '1')
-        {
-            const memberObject = await Post.findById(id);
-            const message = "Dear " + memberObject.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
-            + memberObject.email + " has been modified. Please check at your earliest convenience to see the changes.\n"
-            + "\nSincerely,\n" + tutoringChairs;
-
-            const options = {
-                from: "axstutoring@zohomail.com",
-                to: memberObject.email,
-                subject: "AXS Tutoring - Account Modification",
-                text: message,
-            };
-            
-            await new Promise((resolve, reject) => {
-                transporter.sendMail(options, function (err, info){
-                    if (err)
-                    {
-                        reject(err);
-                    }
-                    else
-                    {
-                        resolve("email sent");
-                    }
-                    //console.log("Sent", info.response);
-                });
-            })
-        }
-        
         res.json("Success");
-      
-    } catch (err) {
-      console.error(err);
-      res.status(500).send('Server Error');
     }
+    catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+        }
+    
   });
-  
 
 /*
 app.put('/feed/edit/:_id', async (req, res) => {
@@ -883,44 +885,51 @@ app.put('/feed/edit/:_id', async (req, res) => {
 })
 */
 
-app.delete('/feed/delete/:id', async (req, res) => {
-    try {
-        const postId = req.params.id;
-        const post = await Post.findByIdAndDelete(postId);
-        if (!post) {
-            return res.status(404).send('Post not found');
-        }
-        if (req.query.notify === '1')
+  app.delete('/feed/delete', async (req, res) => {
+    try 
+    {
+        for (let i = 0; i < req.query.memberCheckBox.length; i++)
         {
-            const message = "Dear " + post.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
-            + post.email + " has been deleted.\n"
-            + "\nSincerely,\n" + tutoringChairs;
+            if (req.query.memberCheckBox[i] === "true")
+            {
+                const post = await Post.findByIdAndDelete(req.query.memberList[0][i]);
+                if (!post) {
+                    return res.status(404).send('Post not found');
+                }
+                if (req.query.notify === '1')
+                {
+                    const message = "Dear " + post.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
+                    + post.email + " has been deleted.\n"
+                    + "\nSincerely,\n" + tutoringChairs;
 
-            const options = {
-                from: "axstutoring@zohomail.com",
-                to: post.email,
-                subject: "AXS Tutoring - Account Deletion",
-                text: message,
-            };
-            
-            await new Promise((resolve, reject) => {
-                transporter.sendMail(options, function (err, info){
-                    if (err)
-                    {
-                        reject(err);
-                    }
-                    else
-                    {
-                        resolve("email sent");
-                    }
-                    //console.log("Sent", info.response);
-                });
-            })
+                    const options = {
+                        from: "axstutoring@zohomail.com",
+                        to: post.email,
+                        subject: "AXS Tutoring - Account Deletion",
+                        text: message,
+                    };
+                    
+                    await new Promise((resolve, reject) => {
+                        transporter.sendMail(options, function (err, info){
+                            if (err)
+                            {
+                                reject(err);
+                            }
+                            else
+                            {
+                                resolve("email sent");
+                            }
+                            //console.log("Sent", info.response);
+                        });
+                    })
+                }
+            }
         }
         return res.send('Post deleted successfully');
-        } catch (error) {
-        console.error(error);
-        return res.status(500).send('Internal server error');
+    }
+    catch (error) {
+    console.error(error);
+    return res.status(500).send('Internal server error');
     }
   });
 
@@ -964,7 +973,7 @@ app.delete('/feed/delete/:id', async (req, res) => {
     {
         if (req.query.checkedList[i] === 'true')
         {
-            if (courseList[i].course === req.query.course[i].replace("(-)", ""))
+            if (courseList[i].course === req.query.course[i].replace("(-)", "") || courseList[i].course === req.query.course[i].replace("(+)", ""))
             {
                 const post = await Course.findByIdAndDelete(courseList[i]._id);
                 for (let k = 0; k < memberList.length; k++)
@@ -980,7 +989,7 @@ app.delete('/feed/delete/:id', async (req, res) => {
             {
                 for (let j = 0; j < courseList.length; j++)
                 {
-                    if (courseList[j].course === req.query.course[i].replace("(-)", ""))
+                    if (courseList[j].course === req.query.course[i].replace("(-)", "") || courseList[j].course === req.query.course[i].replace("(+)", ""))
                     {
                         const post = await Course.findByIdAndDelete(courseList[j]._id);
                         for (let k = 0; k < memberList.length; k++)
@@ -1302,17 +1311,26 @@ app.get('/get/course/delete', async (req, res) => {
     for (let i = 0; i < feed.length; i++)
     {
         let flag = true;
+        let flag2 = true;
         for (let j = 0; j < feed2.length; j++)
         {
             if (feed2[j].subject.includes(returnArray[i]))
             {
                 flag = false;
-                break;
+                if (feed2[j].maximumHours > 0)
+                {
+                    flag2 = false;
+                    break;
+                }
             }
         }
         if (flag)
         {
             returnArray[i] += '(-)';
+        }
+        else if (flag2)
+        {
+            returnArray[i] += '(+)';
         }
     }
     res.json(returnArray);
@@ -1320,11 +1338,16 @@ app.get('/get/course/delete', async (req, res) => {
 
 app.get('/members', async (req, res) => {
     const feed = await Post.find();
-    let returnArray = new Array(feed.length);
+    let returnArray = [];
+    let idArray = new Array(feed.length);
+    let nameArray = new Array(feed.length);
     for (let i = 0; i < feed.length; i++)
     {
-        returnArray[i] = feed[i].member;
+        idArray[i] = feed[i]._id;
+        nameArray[i] = feed[i].member;
     }
+    returnArray.push(idArray);
+    returnArray.push(nameArray);
     res.json(returnArray);
 })
 

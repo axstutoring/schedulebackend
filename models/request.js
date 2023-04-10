@@ -12,7 +12,7 @@ const RequestSchema = new Schema ({
     },
     phone: {
         type: String,
-        default: 0
+        default: ""
     },
     request: {
         type: String,

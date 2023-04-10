@@ -12,7 +12,7 @@ const PostSchema = new Schema({
   },
   phone: {
     type: String,
-    default: 0
+    default: ""
   },
   subject: {
     type: String,

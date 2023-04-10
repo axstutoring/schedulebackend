@@ -11,7 +11,7 @@ const RequestSchema = new Schema ({
         required: true
     },
     phone: {
-        type: Number,
+        type: String,
         default: 0
     },
     request: {

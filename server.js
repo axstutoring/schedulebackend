@@ -1,11 +1,14 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const nodemailer = require('nodemailer');
 connection = "mongodb+srv://KevinTang:0hmlsVIAJwbjWuTf@axs-tutoring.c24c5cd.mongodb.net/?retryWrites=true&w=majority";//2xvy-BTPm7zNyvj
 const crypto = require('crypto-js');
-const nodemailer = require('nodemailer');
 
 const tutoringChairs = "Arthur Huang and Claire Luong";
+
+//const hash = crypto.SHA256("Hello").toString();
+/*const transporter = nodemailer.createTransport( {service: "hotmail",auth: {user: "axstutoring@outlook.com",pass: "B4y27*Zct,3.Nw/"}});*/
 
 const transporter = nodemailer.createTransport( {
     service: "Zoho",
@@ -32,12 +35,13 @@ app.use(cors());
 
 app.listen(8080, () => {console.log("Server listening on port 8080");})
 
-const Post = require("./models/post");
-const Course = require("./models/course");
 const Request = require("./models/request");
-const Email = require("./models/email");
 
-const monthList = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const Course = require("./models/course");
+
+const Post = require("./models/post");
+
+const Email = require("./models/email");
 
 const timeTable = ["8:00 AM", "8:15 AM", "8:30 AM", "8:45 AM", 
 "9:00 AM", "9:15 AM", "9:30 AM", "9:45 AM", 
@@ -53,10 +57,12 @@ const timeTable = ["8:00 AM", "8:15 AM", "8:30 AM", "8:45 AM",
 "7:00 PM", "7:15 PM", "7:30 PM", "7:45 PM",
 ];
 
-function dateEncoder(bookDate)
+const subjectDivision = ["Chemistry", "Biology", "Math", "Physics", "Comp Sci"];
+
+function dateEncoder(bookDate)  //compresses the date into string of numbers. "Thu Mar 16 2023 at 10:00AM" would become {40820230316}
 {
     const weekList = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const monthListShort = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const monthList = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
     let dateProcessor = "{";
     let comparisonString = bookDate.substr(0, 3);
@@ -88,7 +94,7 @@ function dateEncoder(bookDate)
     comparisonString = bookDate.substr(4, 3);
     for (let j = 0; j < 12; j++)
     {
-        if (comparisonString === monthListShort[j])
+        if (comparisonString === monthList[j])
         {
             if (j < 9)
             {
@@ -103,969 +109,349 @@ function dateEncoder(bookDate)
     return dateProcessor;
 }
 
-app.get('/credentials', async (req, res) => {
-    let flag = "";
-    const feed = await Post.find();
+function checkDateRange(bookDate, days) //returns true if current time is outside the range of the bookDate + days
+{
+    const monthList = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    dateProcessor = monthList[Number(bookDate[8] + bookDate[9]) - 1] + ' ' + bookDate[10] + bookDate[11] + ' '
+    + bookDate[4] + bookDate[5] + bookDate[6] + bookDate[7];
+
+    let hour = timeTable[Number(bookDate[2] + bookDate[3])];
+    if (hour.substring(hour.length - 2, hour.length) === "PM" && hour.substring(0, 2) !== "12")
+    {
+        let hourNumber = Number(hour.substring(0, 2)) + 12;
+        hour = hourNumber.toString() + hour.substring(2, 5);
+    }
+
+    let dayLightSavings = false;
+    const currentDate = new Date();
+    if (currentDate.getMonth() > 2 && currentDate.getMonth() < 10)
+    {
+        dayLightSavings = true;
+    }
+    else if (currentDate.getMonth() === 2 && (currentDate.getDate() - currentDate.getDay() > 7))
+    {
+        dayLightSavings = true;
+    }
+    else if (currentDate.getMonth() === 10 && (currentDate.getDate() - currentDate.getDay() <= 0))
+    {
+        dayLightSavings = true;
+    }
+
+    if (dayLightSavings)
+    {
+        return (((Date.parse(dateProcessor + ' ' + hour) + days*86400000) + 25200000) < Date.now())
+    }
+    else
+    {
+        return (((Date.parse(dateProcessor + ' ' + hour) + days*86400000) + 28800000) < Date.now())
+    }
+}
+
+function user(email)
+{
+    email = email.toLowerCase();
+    if (email.includes("@g.ucla.edu"))
+    {
+        return (email.replace("@g.ucla.edu", ""));
+    }
+    else if (email.includes("@ucla.edu"))
+    {
+        return (email.replace("@ucla.edu", ""));
+    }
+    return "";
+}
+
+app.get('/startup', async (req, res) => {
+    res.json(0);
+})
+
+app.get('/checkemail', async (req, res) => {
+    const feed = await Email.find();
+    let flag = 1;
+    let username = user(req.query.email);
     for (let i = 0; i < feed.length; i++)
     {
-        if (feed[i].email === req.query.user)
+        if (feed[i].email === username && (feed[i].bookings.length === 0 || feed[i].bookings[0] != '-'))
         {
-            if (crypto.SHA256(req.query.password + (feed[i]._id).toString()).toString() === feed[i].password)
+            let updatedString = "";
+            let bookingsThisWeek = 0;
+            const todayDate = new Date();
+            for (let j = 0; j < feed[i].bookings.length; j+= 13)
             {
-                flag = feed[i]._id;
-                if (feed[i].authorization === 1)
+                if (checkDateRange(feed[i].bookings.substring(j, j + 13), 21))
                 {
-                    flag = "*";
+                    updatedString += feed[i].bookings.substring(j, j + 13);
                 }
-                break;
+                if (checkDateRange(feed[i].bookings.substring(j, j + 13), 0))
+                {
+                    bookingsThisWeek++;
+                }
             }
+            const post = await Email.findByIdAndUpdate(feed[i]._id, {
+                bookings: updatedString,
+            }, { new: true });
+            post.save();
+            if (bookingsThisWeek < 2 && updatedString.length < 52)
+            {
+                flag = 0;
+            }
+            else if (updatedString.length >= 52)
+            {
+                flag = 2;
+            }
+            else if (bookingsThisWeek >= 2)
+            {
+                flag = 3;
+            }
+            break;
         }
     }
     res.json(flag);
 })
 
-app.get('/feed/:id', async (req, res) => {
-    const courseFeed = await Course.find();
-    const feed = await Post.find();
-    let subjectList = new Array(feed.length);
-    for (let i = 0; i < courseFeed.length; i++)
-    {
-        subjectList[i] = courseFeed[i].course
-    }
+app.get('/checkcode', async (req, res) => {
+    const feed = await Email.find();
 
-    let memberOfInterest = req.params.id;
-
-    let returnObject = new Array(17);
-
+    let flag = false;
+    let username = user(req.query.email);
     for (let i = 0; i < feed.length; i++)
     {
-        if (feed[i]._id.toString() === memberOfInterest)
+        if (feed[i].email === username)
         {
-            let getSun = new Array(48).fill(false);
-            let getMon = new Array(48).fill(false);
-            let getTue = new Array(48).fill(false);
-            let getWed = new Array(48).fill(false);
-            let getThurs = new Array(48).fill(false);
-            let getFri = new Array(48).fill(false);
-            let getSat = new Array(48).fill(false);
-            let getSubject = new Array(subjectList.length).fill(false);
-
-            //setId(response.data[i]._id.toString());
-            //setMemberEmail(response.data[i].email);
-            //setMemberPhone(response.data[i].phone);
-            //setMaximumHours(response.data[i].maximumHours);
-            for (let j = 0; j < feed[i].subject.length; j++)
+            if (feed[i].bookings.substring(1, 7) === req.query.code)
             {
-                let buildSubject = "";
-                if (feed[i].subject[j] === "{")
+                flag = true;
+                if (feed[i].bookings.length > 0 && feed[i].bookings[0] === '-')
                 {
-                    j++;
-                    while (feed[i].subject[j] !== "}")
-                    {
-                        buildSubject += feed[i].subject[j];
-                        j++;
-                    }
-                    for (let k = 0; k < subjectList.length; k++)
-                    {
-                        if (subjectList[k] === buildSubject)
-                        {
-                            getSubject[k] = true;
-                            buildSubject = "";
-                            break;
-                        }
-                    }
-                }
-            }
-
-            //setSubject(getSubject);
-            for (let j = 0; j < feed[i].availability.length; j+=3)
-            {
-                switch (feed[i].availability[j])
-                {
-                    case "0":
-                        getSun[Number(feed[i].availability[j + 1] + feed[i].availability[j + 2])] = true;
-                        break
-                    case "1":
-                        getMon[Number(feed[i].availability[j + 1] + feed[i].availability[j + 2])] = true;
-                        break
-                    case "2":
-                        getTue[Number(feed[i].availability[j + 1] + feed[i].availability[j + 2])] = true;
-                        break
-                    case "3":
-                        getWed[Number(feed[i].availability[j + 1] + feed[i].availability[j + 2])] = true;
-                        break
-                    case "4":
-                        getThurs[Number(feed[i].availability[j + 1] + feed[i].availability[j + 2])] = true;
-                        break
-                    case "5":
-                        getFri[Number(feed[i].availability[j + 1] + feed[i].availability[j + 2])] = true;
-                        break
-                    case "6":
-                        getSat[Number(feed[i].availability[j + 1] + feed[i].availability[j + 2])] = true;
-                        break
-                    default:
-                        break;
-                }
-            }
-
-            let temp = (new Date(feed[i].off[0])).getMonth() + 1;
-
-            returnObject[0] = feed[i]._id.toString();
-            returnObject[1] = feed[i].member;
-            returnObject[2] = feed[i].email;
-            returnObject[3] = feed[i].phone;
-            returnObject[4] = getSubject;
-            returnObject[5] = getSun;
-            returnObject[6] = getMon;
-            returnObject[7] = getTue;
-            returnObject[8] = getWed;
-            returnObject[9] = getThurs;
-            returnObject[10] = getFri;
-            returnObject[11] = getSat;
-            returnObject[12] = feed[i].maximumHours;
-            if (feed[i].off[0] === 0)
-            {
-                returnObject[13] = 0;
-                returnObject[14] = 0;
-                returnObject[15] = 0;
-                returnObject[16] = 0;
-            }
-            else
-            {
-                returnObject[13] = (new Date(feed[i].off[0])).getMonth() + 1;
-                returnObject[14] = (new Date(feed[i].off[0])).getDate();
-                returnObject[15] = (new Date(feed[i].off[1])).getMonth() + 1;
-                returnObject[16] = (new Date(feed[i].off[1])).getDate();
-            }
-            break;
-        }
-    }
-
-    res.json(returnObject);
-})
-
-app.get('/feed', async (req, res) => {
-    const feed = await Post.find();
-
-    res.json(feed);
-})
-
-app.get('/courseraw', async (req, res) => {
-    const feed = await Course.find();
-
-    res.json(feed);
-})
-
-app.post('/course/new', async (req, res) => {
-    const post = new Course({
-        course: req.body.course,
-        subjectDivision: req.body.subjectDivision,
-    });
-    post.save();
-    res.json(post);
-})
-
-app.post('/feed/new', async (req, res) => {
-    const feed = await Course.find();
-    let subjectList = new Array(feed.length);
-    for (let i = 0; i < feed.length; i++)
-    {
-        subjectList[i] = feed[i].course;
-    }
-
-    let courseList = "";
-    for (let i = 0; i < req.body.subject.length; i++)
-    {
-        if (req.body.subject[i]){courseList += "{" + subjectList[i]+ "}";}
-    }
-
-    let availabilityList = "";
-    let placeHolder = "0";
-    for (let i = 0; i < 48; i++)
-    {
-        if (i === 10){placeHolder = "";}
-        if (req.body.availabilitySun[i]){availabilityList += "0" + placeHolder + i.toString();}
-        if (req.body.availabilityMon[i]){availabilityList += "1" + placeHolder + i.toString();}
-        if (req.body.availabilityTue[i]){availabilityList += "2" + placeHolder + i.toString();}
-        if (req.body.availabilityWed[i]){availabilityList += "3" + placeHolder + i.toString();}
-        if (req.body.availabilityThurs[i]){availabilityList += "4" + placeHolder + i.toString();}
-        if (req.body.availabilityFri[i]){availabilityList += "5" + placeHolder + i.toString();}
-        if (req.body.availabilitySat[i]){availabilityList += "6" + placeHolder + i.toString();}
-    }
-
-    let dateArray = new Array(2).fill(0);
-    if (req.body.monthStart !== "" && req.body.dayStart !== "" && req.body.monthEnd !== "" && req.body.dayEnd !== "")
-    {
-        const currentYear = (new Date()).getFullYear();
-        let futureYear = currentYear;
-        let monthStartNum = 0;
-        let monthEndNum = 0;
-        let dayStartNum = req.body.dayStart;
-        let dayEndNum = req.body.dayEnd;
-        for (let i = 0; i < 13; i++)
-        {
-            if (req.body.monthStart === monthList[i])
-            {
-                monthStartNum = i;
-            }
-            if (req.body.monthEnd === monthList[i])
-            {
-                monthEndNum = i;
-            }
-        }
-
-        if ((monthStartNum === 4 || monthStartNum === 6 || monthStartNum === 9 || monthStartNum === 11) && dayStartNum === "31")
-        {
-            dayStartNum = "30";
-        }
-        else if (monthStartNum === 2 && dayStartNum > "28")
-        {
-            if (currentYear % 4 === 0)
-            {
-                dayStartNum = "29";
-            }
-            else
-            {
-                dayStartNum = "28";
-            }
-        }
-
-        if ((monthEndNum === 4 || monthEndNum === 6 || monthEndNum === 9 || monthEndNum === 11) && dayEndNum === "31")
-        {
-            dayEndNum = "30";
-        }
-        else if (monthEndNum === 2 && dayEndNum > "28")
-        {
-            if (futureYear % 4 === 0)
-            {
-                dayEndNum = "29";
-            }
-            else
-            {
-                dayEndNum = "28";
-            }
-        }
-        //console.log(monthEndNum < monthStartNum);
-        //console.log((monthEndNum === monthStartNum && Number(req.body.dayEnd) < Number(req.body.dayStart)));
-        if (monthEndNum < monthStartNum || (monthEndNum === monthStartNum && Number(dayEndNum) < Number(dayStartNum)))
-        {
-            futureYear++;
-        }
-
-        //console.log(req.body.monthStart + " " + dayStartNum + ", " + currentYear.toString());
-        //console.log(req.body.monthEnd + " " + dayEndNum + ", " + futureYear.toString());
-        dateArray[0] = Date.parse(req.body.monthStart + " " + dayStartNum + ", " + currentYear.toString());
-        dateArray[1] = Date.parse(req.body.monthEnd + " " + dayEndNum + ", " + futureYear.toString());
-    }
-
-    let rank = 0;
-    if ((crypto.SHA256(req.body.password + "titan")).toString() === "6a4d49c0ce73e3ef85d0a0770f36d93dc3bbc13552427e462d15ce21fd1daf04")
-    {
-        rank = 1;
-    }
-
-    let post = new Post({
-        member: req.body.member,
-        email: req.body.email,
-        phone: req.body.phone,
-        subject: courseList,
-        availability: availabilityList,
-        maximumHours: req.body.maximumHours,
-        off: dateArray,
-        password: "-",
-        authorization: rank,
-    });
-
-    await post.save();
-
-    const idString = (post._id).toString();
-
-    if (req.body.notify === '1')
-    {
-        const message = "Dear " + req.body.member + ",\n\n" + "A tutoring account has been created under the email " + req.body.email +
-        ". Your temporary password is " + idString.substring(idString.length - 6, idString.length) + " which can be changed by logging"
-        + " into https://axstutoring.github.io/schedule, clicking 'modify schedule', and entering a password at the bottom of the page.\n"
-        + "\nSincerely,\n" + tutoringChairs;
-
-        const options = {
-            from: "axstutoring@zohomail.com",
-            to: req.body.email,
-            subject: "AXS Tutoring - Account Creation",
-            text: message,
-        };
-        
-        await new Promise((resolve, reject) => {
-            transporter.sendMail(options, function (err, info){
-                if (err)
-                {
-                    reject(err);
-                }
-                else
-                {
-                    resolve("email sent");
-                }
-                //console.log("Sent", info.response);
-            });
-        })
-    }
-
-    const post1 = await Post.findByIdAndUpdate(post._id, {
-        password: crypto.SHA256(idString.substring(idString.length - 6, idString.length) + idString).toString(),
-    }, { new: true });
-
-    post1.save();
-
-    res.json(post);
-})
-
-app.put('/feed/edit/:id', async (req, res) => {
-    const feed = await Course.find();
-    let subjectList = new Array(feed.length);
-    for (let i = 0; i < feed.length; i++)
-    {
-        subjectList[i] = feed[i].course
-    }
-
-    let courseList = "";
-    for (let i = 0; i < req.body.subject.length; i++)
-    {
-        if (req.body.subject[i]){courseList += "{" + subjectList[i]+ "}";}
-    }
-
-    let availabilityList = "";
-    let placeHolder = "0";
-    for (let i = 0; i < 48; i++)
-    {
-        if (i === 10){placeHolder = "";}
-        if (req.body.availabilitySun[i]){availabilityList += "0" + placeHolder + i.toString();}
-        if (req.body.availabilityMon[i]){availabilityList += "1" + placeHolder + i.toString();}
-        if (req.body.availabilityTue[i]){availabilityList += "2" + placeHolder + i.toString();}
-        if (req.body.availabilityWed[i]){availabilityList += "3" + placeHolder + i.toString();}
-        if (req.body.availabilityThurs[i]){availabilityList += "4" + placeHolder + i.toString();}
-        if (req.body.availabilityFri[i]){availabilityList += "5" + placeHolder + i.toString();}
-        if (req.body.availabilitySat[i]){availabilityList += "6" + placeHolder + i.toString();}
-    }
-
-    let dateArray = new Array(2).fill(0);
-    if (req.body.monthStart !== "" && req.body.dayStart !== "" && req.body.monthEnd !== "" && req.body.dayEnd !== "")
-    {
-        const currentYear = (new Date()).getFullYear();
-        let futureYear = currentYear;
-        let monthStartNum = 0;
-        let monthEndNum = 0;
-        let dayStartNum = req.body.dayStart;
-        let dayEndNum = req.body.dayEnd;
-        for (let i = 0; i < 13; i++)
-        {
-            if (req.body.monthStart === monthList[i])
-            {
-                monthStartNum = i;
-            }
-            if (req.body.monthEnd === monthList[i])
-            {
-                monthEndNum = i;
-            }
-        }
-
-        if ((monthStartNum === 4 || monthStartNum === 6 || monthStartNum === 9 || monthStartNum === 11) && dayStartNum === "31")
-        {
-            dayStartNum = "30";
-        }
-        else if (monthStartNum === 2 && dayStartNum > "28")
-        {
-            if (currentYear % 4 === 0)
-            {
-                dayStartNum = "29";
-            }
-            else
-            {
-                dayStartNum = "28";
-            }
-        }
-
-        if ((monthEndNum === 4 || monthEndNum === 6 || monthEndNum === 9 || monthEndNum === 11) && dayEndNum === "31")
-        {
-            dayEndNum = "30";
-        }
-        else if (monthEndNum === 2 && dayEndNum > "28")
-        {
-            if (futureYear % 4 === 0)
-            {
-                dayEndNum = "29";
-            }
-            else
-            {
-                dayEndNum = "28";
-            }
-        }
-        //console.log(monthEndNum < monthStartNum);
-        //console.log((monthEndNum === monthStartNum && Number(req.body.dayEnd) < Number(req.body.dayStart)));
-        if (monthEndNum < monthStartNum || (monthEndNum === monthStartNum && Number(dayEndNum) < Number(dayStartNum)))
-        {
-            futureYear++;
-        }
-
-        //console.log(req.body.monthStart + " " + dayStartNum + ", " + currentYear.toString());
-        //console.log(req.body.monthEnd + " " + dayEndNum + ", " + futureYear.toString());
-        dateArray[0] = Date.parse(req.body.monthStart + " " + dayStartNum + ", " + currentYear.toString());
-        dateArray[1] = Date.parse(req.body.monthEnd + " " + dayEndNum + ", " + futureYear.toString());
-    }
-
-    const id = req.params.id;
-
-    let newPassword = "";
-    if (req.body.password !== "")
-    {
-        newPassword = (crypto.SHA256(req.body.password + id.toString())).toString();
-    }
-
-    if (req.body.notify === '1')
-    {
-        const message = "Dear " + req.body.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
-        + req.body.email + " has been modified.\n"
-        + "\nSincerely,\n" + tutoringChairs;
-
-        const options = {
-            from: "axstutoring@zohomail.com",
-            to: req.body.email,
-            subject: "AXS Tutoring - Account Modification",
-            text: message,
-        };
-        
-        await new Promise((resolve, reject) => {
-            transporter.sendMail(options, function (err, info){
-                if (err)
-                {
-                    reject(err);
-                }
-                else
-                {
-                    resolve("email sent");
-                }
-                //console.log("Sent", info.response);
-            });
-        })
-    }
-
-    const memberObject = await Post.findById(id);
-    if (memberObject.authorization === 0 && 
-        ((crypto.SHA256(req.body.password + "titan")).toString() === "6a4d49c0ce73e3ef85d0a0770f36d93dc3bbc13552427e462d15ce21fd1daf04"))
-    {
-        try {
-            const post = await Post.findByIdAndUpdate(id, {
-                member: req.body.member,
-                email: req.body.email,
-                phone: req.body.phone,
-                subject: courseList,
-                availability: availabilityList,
-                maximumHours: req.body.maximumHours,
-                off: dateArray,
-                authorization: 1,
-                password: memberObject.password,
-          }, { new: true });
-      
-          post.save();
-          res.json(post);
-          
-        } catch (err) {
-          console.error(err);
-          res.status(500).send('Server Error');
-        }
-    }
-    else if (newPassword !== "")
-    {
-        const memberObject1 = await Post.findById(id);
-        try {
-            const post = await Post.findByIdAndUpdate(id, {
-                member: req.body.member,
-                email: req.body.email,
-                phone: req.body.phone,
-                subject: courseList,
-                availability: availabilityList,
-                maximumHours: req.body.maximumHours,
-                off: dateArray,
-                authorization: memberObject1.authorization,
-                password: newPassword,
-          }, { new: true });
-      
-          post.save();
-          res.json(post);
-          
-        } catch (err) {
-          console.error(err);
-          res.status(500).send('Server Error');
-        }
-    }
-    else
-    {
-        const memberObject1 = await Post.findById(id);
-        try {
-            const post = await Post.findByIdAndUpdate(id, {
-                member: req.body.member,
-                email: req.body.email,
-                phone: req.body.phone,
-                subject: courseList,
-                availability: availabilityList,
-                maximumHours: req.body.maximumHours,
-                off: dateArray,
-                authorization: memberObject1.authorization,
-                password: memberObject1.password,
-          }, { new: true });
-      
-          post.save();
-          res.json(post);
-          
-        } catch (err) {
-          console.error(err);
-          res.status(500).send('Server Error');
-        }
-    }
-  });
-
-  app.put('/feed/edit/mass/:id', async (req, res) => {
-    const feed = await Course.find();
-    let subjectList = new Array(feed.length);
-    for (let i = 0; i < feed.length; i++)
-    {
-        subjectList[i] = feed[i].course
-    }
-
-    let courseList = "";
-    for (let i = 0; i < req.body.subject.length; i++)
-    {
-        if (req.body.subject[i]){courseList += "{" + subjectList[i]+ "}";}
-    }
-
-    let availabilityList = "";
-    let placeHolder = "0";
-    for (let i = 0; i < 48; i++)
-    {
-        if (i === 10){placeHolder = "";}
-        if (req.body.availabilitySun[i]){availabilityList += "0" + placeHolder + i.toString();}
-        if (req.body.availabilityMon[i]){availabilityList += "1" + placeHolder + i.toString();}
-        if (req.body.availabilityTue[i]){availabilityList += "2" + placeHolder + i.toString();}
-        if (req.body.availabilityWed[i]){availabilityList += "3" + placeHolder + i.toString();}
-        if (req.body.availabilityThurs[i]){availabilityList += "4" + placeHolder + i.toString();}
-        if (req.body.availabilityFri[i]){availabilityList += "5" + placeHolder + i.toString();}
-        if (req.body.availabilitySat[i]){availabilityList += "6" + placeHolder + i.toString();}
-    }
-
-    let dateArray = new Array(2).fill(0);
-    if (req.body.monthStart !== "" && req.body.dayStart !== "" && req.body.monthEnd !== "" && req.body.dayEnd !== "")
-    {
-        const currentYear = (new Date()).getFullYear();
-        let futureYear = currentYear;
-        let monthStartNum = 0;
-        let monthEndNum = 0;
-        let dayStartNum = req.body.dayStart;
-        let dayEndNum = req.body.dayEnd;
-        for (let i = 0; i < 13; i++)
-        {
-            if (req.body.monthStart === monthList[i])
-            {
-                monthStartNum = i;
-            }
-            if (req.body.monthEnd === monthList[i])
-            {
-                monthEndNum = i;
-            }
-        }
-
-        if ((monthStartNum === 4 || monthStartNum === 6 || monthStartNum === 9 || monthStartNum === 11) && dayStartNum === "31")
-        {
-            dayStartNum = "30";
-        }
-        else if (monthStartNum === 2 && dayStartNum > "28")
-        {
-            if (currentYear % 4 === 0)
-            {
-                dayStartNum = "29";
-            }
-            else
-            {
-                dayStartNum = "28";
-            }
-        }
-
-        if ((monthEndNum === 4 || monthEndNum === 6 || monthEndNum === 9 || monthEndNum === 11) && dayEndNum === "31")
-        {
-            dayEndNum = "30";
-        }
-        else if (monthEndNum === 2 && dayEndNum > "28")
-        {
-            if (futureYear % 4 === 0)
-            {
-                dayEndNum = "29";
-            }
-            else
-            {
-                dayEndNum = "28";
-            }
-        }
-        //console.log(monthEndNum < monthStartNum);
-        //console.log((monthEndNum === monthStartNum && Number(req.body.dayEnd) < Number(req.body.dayStart)));
-        if (monthEndNum < monthStartNum || (monthEndNum === monthStartNum && Number(dayEndNum) < Number(dayStartNum)))
-        {
-            futureYear++;
-        }
-
-        //console.log(req.body.monthStart + " " + dayStartNum + ", " + currentYear.toString());
-        //console.log(req.body.monthEnd + " " + dayEndNum + ", " + futureYear.toString());
-        dateArray[0] = Date.parse(req.body.monthStart + " " + dayStartNum + ", " + currentYear.toString());
-        dateArray[1] = Date.parse(req.body.monthEnd + " " + dayEndNum + ", " + futureYear.toString());
-    }
-
-    try
-    {
-        for (let i = 1; i < req.body.identification.length; i+=26)
-        {
-            const id = req.body.identification.substring(i, i + 24);
-            if (req.body.email !== "")
-            {
-                const memberObject = await Post.findById(id);
-                const post = await Post.findByIdAndUpdate(id, {
-                    member: memberObject.member,
-                    email: req.body.email,
-                    phone: memberObject.phone,
-                    subject: memberObject.subject,
-                    availability: memberObject.availability,
-                    off: memberObject.off,
-                    maximumHours: memberObject.maximumHours,
-                    authorization: memberObject.authorization,
-                    password: memberObject.password,
-                }, { new: true });
-                post.save();
-            }
-            if (req.body.phone !== 0)
-            {
-                const memberObject = await Post.findById(id);
-                const post = await Post.findByIdAndUpdate(id, {
-                    member: memberObject.member,
-                    email: memberObject.email,
-                    phone: req.body.phone,
-                    subject: memberObject.subject,
-                    availability: memberObject.availability,
-                    off: memberObject.off,
-                    maximumHours: memberObject.maximumHours,
-                    authorization: memberObject.authorization,
-                    password: memberObject.password,
-                }, { new: true });
-                post.save();
-            }
-            if (courseList !== "")
-            {
-                const memberObject = await Post.findById(id);
-                const post = await Post.findByIdAndUpdate(id, {
-                    member: memberObject.member,
-                    email: memberObject.email,
-                    phone: memberObject.phone,
-                    subject: courseList,
-                    availability: memberObject.availability,
-                    off: memberObject.off,
-                    maximumHours: memberObject.maximumHours,
-                    authorization: memberObject.authorization,
-                    password: memberObject.password,
-                }, { new: true });
-                post.save();
-            }
-            if (availabilityList !== "")
-            {
-                const memberObject = await Post.findById(id);
-                const post = await Post.findByIdAndUpdate(id, {
-                    member: memberObject.member,
-                    email: memberObject.email,
-                    phone: memberObject.phone,
-                    subject: memberObject.subject,
-                    availability: availabilityList,
-                    off: memberObject.off,
-                    maximumHours: memberObject.maximumHours,
-                    authorization: memberObject.authorization,
-                    password: memberObject.password,
-                }, { new: true });
-                post.save();
-            }
-            if (req.body.maximumHours !== -1)
-            {
-                const memberObject = await Post.findById(id);
-                const post = await Post.findByIdAndUpdate(id, {
-                    member: memberObject.member,
-                    email: memberObject.email,
-                    phone: memberObject.phone,
-                    subject: memberObject.subject,
-                    availability: memberObject.availability,
-                    off: memberObject.off,
-                    maximumHours: req.body.maximumHours,
-                    authorization: memberObject.authorization,
-                    password: memberObject.password,
-                }, { new: true });
-                post.save();
-            }
-            if (dateArray[0] !== 0)
-            {
-                const memberObject = await Post.findById(id);
-                const post = await Post.findByIdAndUpdate(id, {
-                    member: memberObject.member,
-                    email: memberObject.email,
-                    phone: memberObject.phone,
-                    subject: memberObject.subject,
-                    availability: memberObject.availability,
-                    off: dateArray,
-                    maximumHours: memberObject.maximumHours,
-                    authorization: memberObject.authorization,
-                    password: memberObject.password,
-                }, { new: true });
-                post.save();
-            }
-            if (req.body.password !== "")
-            {
-                const memberObject = await Post.findById(id);
-                const post = await Post.findByIdAndUpdate(id, {
-                    member: memberObject.member,
-                    email: memberObject.email,
-                    phone: memberObject.phone,
-                    subject: memberObject.subject,
-                    availability: memberObject.availability,
-                    off: memberObject.off,
-                    maximumHours: memberObject.maximumHours,
-                    authorization: memberObject.authorization,
-                    password: (crypto.SHA256(req.body.password + id.toString())).toString(),
-                }, { new: true });
-                post.save();
-            }
-            if (req.body.notify === '1')
-            {
-                const memberObject = await Post.findById(id);
-                const message = "Dear " + memberObject.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
-                + memberObject.email + " has been modified. Please check at your earliest convenience to see the changes.\n"
-                + "\nSincerely,\n" + tutoringChairs;
-    
-                const options = {
-                    from: "axstutoring@zohomail.com",
-                    to: memberObject.email,
-                    subject: "AXS Tutoring - Account Modification",
-                    text: message,
-                };
-                
-                await new Promise((resolve, reject) => {
-                    transporter.sendMail(options, function (err, info){
-                        if (err)
-                        {
-                            reject(err);
-                        }
-                        else
-                        {
-                            resolve("email sent");
-                        }
-                        //console.log("Sent", info.response);
-                    });
-                })
-            }
-        }
-        res.json("Success");
-    }
-    catch (err) {
-        console.error(err);
-        res.status(500).send('Server Error');
-        }
-    
-  });
-
-/*
-app.put('/feed/edit/:_id', async (req, res) => {
-    const post = await Post.findById(req.params._id);
-    post.member = req.body.member;
-    post.email = req.body.email;
-    post.phone = req.body.phone;
-    post.subject = req.body.subject,
-    post.availability = req.body.availability,
-    post.maximumHours = req.body.maximumHours,
-    post.save();
-
-    res.json(post);
-})
-*/
-
-  app.delete('/feed/delete', async (req, res) => {
-    try 
-    {
-        for (let i = 0; i < req.query.memberCheckBox.length; i++)
-        {
-            if (req.query.memberCheckBox[i] === "true")
-            {
-                const post = await Post.findByIdAndDelete(req.query.memberList[0][i]);
-                if (!post) {
-                    return res.status(404).send('Post not found');
-                }
-                if (req.query.notify === '1')
-                {
-                    const message = "Dear " + post.member + ",\n\n" + "The information pertaining to your tutoring account under the email " 
-                    + post.email + " has been deleted.\n"
-                    + "\nSincerely,\n" + tutoringChairs;
-
-                    const options = {
-                        from: "axstutoring@zohomail.com",
-                        to: post.email,
-                        subject: "AXS Tutoring - Account Deletion",
-                        text: message,
-                    };
-                    
-                    await new Promise((resolve, reject) => {
-                        transporter.sendMail(options, function (err, info){
-                            if (err)
-                            {
-                                reject(err);
-                            }
-                            else
-                            {
-                                resolve("email sent");
-                            }
-                            //console.log("Sent", info.response);
-                        });
-                    })
-                }
-            }
-        }
-        return res.send('Post deleted successfully');
-    }
-    catch (error) {
-    console.error(error);
-    return res.status(500).send('Internal server error');
-    }
-  });
-
-  app.delete('/course/delete/:id', async (req, res) => {
-    try {
-
-        const postId = req.params.id;
-        const post = await Course.findByIdAndDelete(postId);
-
-        const feed = await Post.find();
-
-        for (let i = 0; i < feed.length; i++)
-        {
-            if (feed[i].subject.includes(post.course))
-            {
-                const postMembers = await Post.findByIdAndUpdate(feed[i]._id, {
-                    subject: feed[i].subject.replace("{" + post.course + "}", ""),
+                    const id = feed[i]._id;
+                    const post = await Email.findByIdAndUpdate(id, {
+                        bookings: "",
                     }, { new: true });
-                postMembers.save();
-            }
-        }
-
-        if (!post) {
-            return res.status(404).send('Post not found');
-        }
-        return res.send('Post deleted successfully');
-        } catch (error) {
-        console.error(error);
-        return res.status(500).send('Internal server error');
-    }
-  });
-
-  app.delete('/course/delete', async (req, res) => {
-
-    let memberList = await Post.find();
-    let memberListCheck = new Array(memberList.length).fill(false);
-
-    let courseList = await Course.find();
-
-    for (let i = 0; i < req.query.checkedList.length; i++)
-    {
-        if (req.query.checkedList[i] === 'true')
-        {
-            if (courseList[i].course === req.query.course[i].replace("(-)", "") || courseList[i].course === req.query.course[i].replace("(+)", ""))
-            {
-                const post = await Course.findByIdAndDelete(courseList[i]._id);
-                for (let k = 0; k < memberList.length; k++)
-                {
-                    if (memberList[k].subject.includes(post.course))
-                    {
-                        memberList[k].subject = memberList[k].subject.replace("{" + post.course + "}", "");
-                        memberListCheck[k] = true;
-                    }
+                    post.save();
                 }
             }
-            else
+        }
+    }
+
+    res.json(flag);
+})
+
+app.post('/email/new', async (req, res) => {
+    const feed = await Email.find();
+
+    let code = "";
+
+    for (let i = 0; i < 6; i++)
+    {
+        code += Math.floor(Math.random() * 10).toString();
+    }
+    let username = user(req.body.email);
+    let flag = true;
+    let sendEmail = false;
+
+    for (let i = 0; i < feed.length; i++)
+    {
+        if (feed[i].email === username)
+        {
+            if (Date.now() - Number(feed[i].bookings.substring(8)) > 60000)
             {
-                for (let j = 0; j < courseList.length; j++)
+                const id = feed[i]._id;
+                const post = await Email.findByIdAndUpdate(id, {
+                    bookings: "-" + code + "|" + Date.now().toString(),
+                }, { new: true });
+                post.save();
+                sendEmail = true;
+            }
+            flag = false;
+            break;
+        }
+    }
+    if (flag)
+    {
+        const post = new Email({
+            email: username,
+            bookings: "-" + code + "|" + Date.now().toString(),
+        });
+        post.save();
+        sendEmail = true;
+    }
+
+    if (sendEmail)
+    {
+        const message = "Dear " + req.body.student + ",\n\n" + "Please enter " + code + " to validate your email.\n"
+        + "\nSincerely,\n" + tutoringChairs;
+
+        const options = {
+            from: "axstutoring@zohomail.com",
+            to: req.body.email,
+            subject: "AXS Tutoring - Email Validation",
+            text: message,
+        };
+        
+        await new Promise((resolve, reject) => {
+            transporter.sendMail(options, function (err, info){
+                if (err)
                 {
-                    if (courseList[j].course === req.query.course[i].replace("(-)", "") || courseList[j].course === req.query.course[i].replace("(+)", ""))
+                    reject(err);
+                }
+                else
+                {
+                    resolve("email sent");
+                }
+            });
+        })
+    }
+    res.json(0);
+})
+
+app.get('/courselist', async (req, res) => {
+    const feed = await Course.find();
+
+    let returnArray = new Array;
+
+    function isNumber(str){
+        return /^\d+$/.test(str);
+    }
+
+    let position = 0;
+    for (; position < subjectDivision.length; position++)
+    {
+        if (subjectDivision[position] === req.query.series)
+        {
+            break;
+        }
+    }
+    for (let i = 0; i < feed.length; i++)
+    {
+        if (feed[i].subjectDivision[position])
+        {
+            if (req.query.alternative !== "")
+            {
+                if (req.query.alternative === "Up")
+                {
+                    let count = 0;
+                    for (let j = 0; j < feed[i].course.length; j++)
                     {
-                        const post = await Course.findByIdAndDelete(courseList[j]._id);
-                        for (let k = 0; k < memberList.length; k++)
+                        if (isNumber(feed[i].course[j]))
                         {
-                            if (memberList[k].subject.includes(post.course))
+                            count++;
+                        }
+                    }
+                    if (count === 3)
+                    {
+                        returnArray.push(feed[i].course);
+                    }
+                }
+                else if (req.query.alternative === "Ot")
+                {
+                    if ((!feed[i].course.includes("14") && !feed[i].course.includes("20") && !feed[i].course.includes("30")))
+                    {
+                        let count = 0;
+                        for (let j = 0; j < feed[i].course.length; j++)
+                        {
+                            if (isNumber(feed[i].course[j]))
                             {
-                                memberList[k].subject = memberList[k].subject.replace("{" + post.course + "}", "");
-                                memberListCheck[k] = true;
+                                count++;
                             }
                         }
+                        if (count < 3)
+                        {
+                            returnArray.push(feed[i].course);
+                        }
+                    }
+                }
+                else if ((feed[i].course.includes(req.query.alternative)))
+                {
+                    returnArray.push(feed[i].course);
+                }
+            }
+            else{
+                returnArray.push(feed[i].course);
+            }
+        }
+    }
+    returnArray.sort();
+    res.json(returnArray);
+})
+
+app.get('/tutorlist', async (req, res) => {
+    const feed = await Post.find();
+
+    let returnArray = new Array;
+    for (let i = 0; i < feed.length; i++)
+    {
+        if ((feed[i].subject.includes(req.query.series)) && feed[i].maximumHours > 0)
+        {
+            returnArray.push(feed[i].member);
+        }
+    }
+
+    res.json(returnArray);
+})
+
+app.get('/find/appointment/info', async (req, res) => {
+    const feed = await Request.find();
+    const feed1 = await Email.find();
+    const feed2 = await Post.find();
+
+    let response = false;
+
+    let memberEmail = "";
+
+    const identity = req.query.info[6];
+
+    for (let i = 0; i < feed.length; i++)
+    {
+        if (feed[i].timestamp === identity && feed[i].tutor === req.query.info[2] && feed[i].date === req.query.info[4])
+        {
+            if ((feed[i]._id.toString()).substring((feed[i]._id.toString()).length - 5, (feed[i]._id.toString()).length) === req.query.code)
+            {
+                let username = user(req.query.info[1]);
+
+                for (let j = 0; j < feed1.length; j++)
+                {
+                    if (feed1[j].email === username)
+                    {
+                        const id = feed1[j]._id;
+                        const post = await Email.findByIdAndUpdate(id, {
+                            bookings: feed1[j].bookings.replace(dateEncoder(req.query.info[4]), ""),
+                        }, { new: true });
+                        post.save();
                         break;
                     }
                 }
-            }
-        }
-    }
 
-    for (let i = 0; i < memberListCheck.length; i++)
-    {
-        if (memberListCheck[i])
-        {
-            const postMembers = await Post.findByIdAndUpdate(memberList[i]._id, {
-                subject: memberList[i].subject,
-                }, { new: true });
-            postMembers.save();
-        }
-    }
+                for (let j = 0; j < feed2.length; j++)
+                {
+                    if (feed2[j].member === req.query.info[2])
+                    {
+                        const id = feed2[j]._id;
+                        memberEmail = feed2[j].email;
+                        const post = await Post.findByIdAndUpdate(id, {
+                            booking: feed2[j].booking.replace(dateEncoder(req.query.info[4]), ""),
+                        }, { new: true });
+                        post.save();
+                        break;
+                    }
+                }
 
-    res.json('Post deleted successfully');
-  })
+                const result = await Request.findByIdAndDelete(feed[i]._id);
 
-  app.delete('/delete/appointment', async(req,res) => {
-
-    let memberList = await Post.find();
-    
-    const post1 = await Request.findById(req.query.appointmentInfo[0]._id);
-
-    memberId = "";
-    memberPosition = 0;
-    for (let i = 0; i < memberList.length; i++)
-    {
-        if (memberList[i].member === post1.tutor)
-        {
-            memberId = (memberList[i]._id).toString();
-            memberPosition = i;
-            break;
-        }
-    }
-    
-    let emailList = await Email.find();
-    let emailListCheck = new Array(emailList.length).fill(false);
-
-    for (let i = 0; i < req.query.checkedList.length; i++)
-    {
-        if (req.query.checkedList[i] === 'true')
-        {
-            const post = await Request.findByIdAndDelete(req.query.appointmentInfo[i]._id);
-
-            //console.log(memberList[memberPosition]);
-            memberList[memberPosition].booking = memberList[memberPosition].booking.replace(dateEncoder(post.date), "");
-            if (req.query.notify === '1')
-            {
-                const message = "Dear " + memberList[memberPosition].member + ",\n\n" + "An appointment has been deleted. Below is the information.\n" 
-                + "Student: " + post.student
-                + "\nEmail: " + post.email
-                + "\nTutor: " + post.tutor
-                + "\nSubject: " + post.subject
-                + "\nDate: " + post.date
-                + "\nPhone: " + post.phone
-                + "\nRequest: " + post.request
-                + "\n\nSincerely,\n" + tutoringChairs;
+                const message = "Dear " + result.tutor + ",\n\nYour appointment with " + result.student + " has been cancelled." + 
+                "\nBelow were the details:\n"
+                + "Student: " + result.student + "\n"
+                + "Email: " + result.email + "\n"
+                + "Subject: " + result.subject + "\n"
+                + "Date: " + result.date + "\n"
+                + "Phone: " + result.phone + "\n"
+                + "Request: " + result.request + "\n"
+                + "\nSincerely,\n" + tutoringChairs;
 
                 const options = {
                     from: "axstutoring@zohomail.com",
-                    to: memberList[memberPosition].email,
-                    subject: "AXS Tutoring - Appointment Deletion",
+                    to: memberEmail,
+                    subject: "AXS Tutoring - Appointment Cancelled",
                     text: message,
                 };
                 
@@ -1079,197 +465,577 @@ app.put('/feed/edit/:_id', async (req, res) => {
                         {
                             resolve("email sent");
                         }
-                        //console.log("Sent", info.response);
                     });
                 })
-            }
 
-            let username = "";
-            if (post.email.includes("@g.ucla.edu"))
-            {
-                username = post.email.replace("@g.ucla.edu", "");
-            }
-            else if (post.email.includes("@ucla.edu"))
-            {
-                username = post.email.replace("@ucla.edu", "");
-            }
-            for (let j = 0; j < emailList.length; j++)
-            {
-                if (username === emailList[j].email)
-                {
-                    emailList[j].bookings = emailList[j].bookings.replace(dateEncoder(post.date), "");
-                    emailListCheck[j] = true;
-                    if (req.query.notify === '1')
-                    {
-                        const message = "Dear " + post.student + ",\n\n" + "Your appointment with " + post.tutor + " on " + post.date + " for " +
-                        post.subject + " has been deleted."
-                        + "\n\nSincerely,\n" + tutoringChairs;
+                const message1 = "Dear " + result.student + ",\n\nThis is a confirmation of your cancellation for tutoring with " 
+                + result.tutor + " on " + result.date + " for " + result.subject + ". No further action is required." + 
+                "\n\nSincerely,\n" + tutoringChairs
+                + "\n\n[Do not reply to this email. For all inquiries please contact us at tutoring.axsbg@gmail.com]";
 
-                        const options = {
-                            from: "axstutoring@zohomail.com",
-                            to: post.email,
-                            subject: "AXS Tutoring - Appointment Deletion",
-                            text: message,
-                        };
-                        
-                        await new Promise((resolve, reject) => {
-                            transporter.sendMail(options, function (err, info){
-                                if (err)
-                                {
-                                    reject(err);
-                                }
-                                else
-                                {
-                                    resolve("email sent");
-                                }
-                                //console.log("Sent", info.response);
-                            });
-                        })
-                    }
-                    break;
-                }
+                const options1 = {
+                    from: "axstutoring@zohomail.com",
+                    to: result.email,
+                    subject: "AXS Tutoring - Appointment Cancellation",
+                    text: message1,
+                };
+                
+                await new Promise((resolve, reject) => {
+                    transporter.sendMail(options1, function (err, info){
+                        if (err)
+                        {
+                            reject(err);
+                        }
+                        else
+                        {
+                            resolve("email sent");
+                        }
+                    });
+                })
+                response = true;
+                break;
             }
         }
     }
+    res.json(response);
+})
 
+app.get('/find/appointment', async (req, res) => {
+    const feed = await Request.find();
 
-    const postMembers = await Post.findByIdAndUpdate(memberId, {
-        member: memberList[memberPosition].member,
-        email: memberList[memberPosition].email,
-        phone: memberList[memberPosition].phone,
-        subject: memberList[memberPosition].subject,
-        availability: memberList[memberPosition].availability,
-        maximumHours: memberList[memberPosition].maximumHours,
-        off: memberList[memberPosition].off,
-        password: memberList[memberPosition].password,
-        authorization: memberList[memberPosition].authorization,
-        booking: memberList[memberPosition].booking,
-        }, { new: true });
-    postMembers.save();
+    const feed2 = await Course.find();
 
-    for (let i = 0; i < emailList.length; i++)
-    {
-        if (emailListCheck[i])
-        {
-            const postEmail = await Email.findByIdAndUpdate(emailList[i]._id, {
-                email: emailList[i].email,
-                bookings: emailList[i].bookings,
-            })
-            postEmail.save();
-        }
-    }
+    let returnArray = new Array(2).fill([]);
+    let upcomingAppointment = [];
+    let pastAppointment = [];
 
-    res.json('Post deleted successfully');
+    let username = user(req.query.email);
 
-/*
-    const postId = req.params.id;
-    const post = await Request.findByIdAndDelete(postId);
-
-    const feed = await Post.find();
     for (let i = 0; i < feed.length; i++)
     {
-        if (feed[i].member === post.tutor)
+        if ((feed[i].email.toLowerCase() === username + "@ucla.edu") || (feed[i].email.toLowerCase() === username + "@g.ucla.edu"))
         {
-            const postMembers = await Post.findByIdAndUpdate(feed[i]._id, {
-                booking: feed[i].booking.replace(dateEncoder(post.date), ""),
-                }, { new: true });
-            console.log(postMembers);
-            if (req.query.notify === '1')
+            let hour = feed[i].date.substring(19, 24);
+            if (feed[i].date.length === 26)
             {
-                const message = "Dear " + postMembers.member + ",\n\n" + "An appointment has been deleted. Below is the information.\n" 
-                + "Student: " + post.student
-                + "\nEmail: " + post.email
-                + "\nTutor: " + post.tutor
-                + "\nSubject: " + post.subject
-                + "\nDate: " + post.date
-                + "\nPhone: " + post.phone
-                + "\nRequest: " + post.request
-                + "\n\nSincerely,\n" + tutoringChairs;
-
-                const options = {
-                    from: "axstutoring@zohomail.com",
-                    to: postMembers.email,
-                    subject: "AXS Tutoring - Appointment Deletion",
-                    text: message,
-                };
-                
-                await new Promise((resolve, reject) => {
-                    transporter.sendMail(options, function (err, info){
-                        if (err)
-                        {
-                            reject(err);
-                        }
-                        else
-                        {
-                            resolve("email sent");
-                        }
-                        //console.log("Sent", info.response);
-                    });
-                })
+                hour = "0" + feed[i].date.substring(19, 23);
             }
-            break;
-        }
-    }
-
-    let username = "";
-    //console.log(dateEncoder(post.date));
-    if (post.email.includes("@g.ucla.edu"))
-    {
-        username = post.email.replace("@g.ucla.edu", "");
-    }
-    else if (post.email.includes("@ucla.edu"))
-    {
-        username = post.email.replace("@ucla.edu", "");
-    }
-
-    const feed2 = await Email.find();
-    for (let i = 0; i < feed2.length; i++)
-    {
-        if (feed2[i].email === username)
-        {
-            const postEmail = await Email.findByIdAndUpdate(feed2[i]._id, {
-                bookings: feed2[i].bookings.replace(dateEncoder(post.date), ""),
-                }, { new: true });
-            if (req.query.notify === '1')
+            if (feed[i].date.substring(feed[i].date.length - 2, feed[i].date.length) === "PM" && hour.substring(0, 2) !== "12")
             {
-                const message = "Dear " + post.student + ",\n\n" + "Your appointment with " + post.tutor + " on " + post.date + " for " +
-                post.subject + " has been deleted."
-                + "\n\nSincerely,\n" + tutoringChairs;
+                let hourNumber = Number(hour.substring(0, 2)) + 12;
+                hour = hourNumber.toString() + hour.substring(2, 5);
+            }
+            const dateTranslator = Date.parse(feed[i].date.substring(4, 15) + ' ' + hour);
+            const todayDate = Date.now();
 
-                const options = {
-                    from: "axstutoring@zohomail.com",
-                    to: post.email,
-                    subject: "AXS Tutoring - Appointment Deletion",
-                    text: message,
-                };
-                
-                await new Promise((resolve, reject) => {
-                    transporter.sendMail(options, function (err, info){
-                        if (err)
-                        {
-                            reject(err);
-                        }
-                        else
-                        {
-                            resolve("email sent");
-                        }
-                        //console.log("Sent", info.response);
-                    });
-                })
+            let dayLightSavings = false;
+            const currentDate = new Date();
+            if (currentDate.getMonth() > 2 && currentDate.getMonth() < 10)
+            {
+                dayLightSavings = true;
+            }
+            else if (currentDate.getMonth() === 2 && (currentDate.getDate() - currentDate.getDay() > 7))
+            {
+                dayLightSavings = true;
+            }
+            else if (currentDate.getMonth() === 10 && (currentDate.getDate() - currentDate.getDay() <= 0))
+            {
+                dayLightSavings = true;
             }
             
+            if ((dayLightSavings && (dateTranslator + 25200000) > todayDate) || (!dayLightSavings && (dateTranslator + 28800000) > todayDate))
+            {
+                for (let j = 0; j < feed2.length; j++)
+                {
+                    if (feed2[j].course === feed[i].subject)
+                    {
+                        for (let k = feed2[j].subjectDivision.length - 1; k >= 0; k--)
+                        {
+                            if (feed2[j].subjectDivision[k])
+                            {
+                                const template = [feed[i].student, feed[i].email, feed[i].tutor, 
+                                                    feed[i].subject, feed[i].date, k, feed[i].timestamp];
+                                upcomingAppointment.push(template);
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                for (let j = 0; j < feed2.length; j++)
+                {
+                    if (feed2[j].course === feed[i].subject)
+                    {
+                        for (let k = feed2[j].subjectDivision.length - 1; k >= 0; k--)
+                        {
+                            if (feed2[j].subjectDivision[k])
+                            {
+                                const template = [feed[i].student, feed[i].email, feed[i].tutor, 
+                                                    feed[i].subject, feed[i].date, k];
+                                //console.log(template);
+                                pastAppointment.push(template);
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    upcomingAppointment.sort((a, b) => {
+        firstDate = Date.parse(a[4].substring(4, 15));
+        secondDate = Date.parse(b[4].substring(4, 15));
+        //console.log(firstDate);
+        //console.log(secondDate);
+        if (firstDate > secondDate)
+        {
+            return 1;
+        }
+        else
+        {
+            if (firstDate === secondDate)
+            {
+                //console.log(a.substring(a.length - 2, a.length));
+                //console.log(b.substring(b.length - 2, b.length));
+                if (a[4].substring(a[4].length - 2, a[4].length) > b[4].substring(b[4].length - 2, b[4].length))
+                {
+                    return 1;
+                }
+                else
+                {
+                    if (a[4].substring(a[4].length - 2, a[4].length) === b[4].substring(b[4].length - 2, b[4].length))
+                    {
+                        let firstHour = a[4].substring(19, 24);
+                        let secondHour = b[4].substring(19, 24);
+                        if (a[4].length === 26)
+                        {
+                            firstHour = "0" + a[4].substring(19, 23);
+                        }
+                        if (b[4].length === 26)
+                        {
+                            secondHour = "0" + b[4].substring(19, 23);
+                        }
+                        //console.log(firstHour);
+                        //console.log(secondHour);
+                        if (firstHour > secondHour)
+                        {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+        return -1;
+    })
+    pastAppointment.sort((a, b) => {
+        firstDate = Date.parse(a[4].substring(4, 15));
+        secondDate = Date.parse(b[4].substring(4, 15));
+        //console.log(firstDate);
+        //console.log(secondDate);
+        if (firstDate > secondDate)
+        {
+            return 1;
+        }
+        else
+        {
+            if (firstDate === secondDate)
+            {
+                //console.log(a.substring(a.length - 2, a.length));
+                //console.log(b.substring(b.length - 2, b.length));
+                if (a[4].substring(a[4].length - 2, a[4].length) > b[4].substring(b[4].length - 2, b[4].length))
+                {
+                    return 1;
+                }
+                else
+                {
+                    if (a[4].substring(a[4].length - 2, a[4].length) === b[4].substring(b[4].length - 2, b[4].length))
+                    {
+                        let firstHour = a[4].substring(19, 24);
+                        let secondHour = b[4].substring(19, 24);
+                        if (a[4].length === 26)
+                        {
+                            firstHour = "0" + a[4].substring(19, 23);
+                        }
+                        if (b[4].length === 26)
+                        {
+                            secondHour = "0" + b[4].substring(19, 23);
+                        }
+                        //console.log(firstHour);
+                        //console.log(secondHour);
+                        if (firstHour > secondHour)
+                        {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+        return -1;
+    })
+    returnArray[0] = upcomingAppointment;
+    returnArray[1] = pastAppointment;
+    res.json(returnArray);
+})
+
+app.get('/datelist', async (req, res) => {
+    const feed = await Post.find();
+
+    let week = new Array;
+
+    for (let i = 0; i < 7; i++)
+    {
+        let hour = new Array(48).fill(false);
+        week.push(hour);
+    }
+
+    let returnArray = [];
+    let comparisonString = "";
+    let savedString = "";
+    let maxHours = 0;
+    let dayOffStart = 0;
+    let dayOffEnd = 0;
+
+    for (let i = 0; i < feed.length; i++)
+    {
+        if (feed[i].member === req.query.memberName)
+        {
+            dayOffStart = feed[i].off[0];
+            dayOffEnd = feed[i].off[1];
+            maxHours = feed[i].maximumHours;
+            for (let j = 0; j < feed[i].availability.length; j+=3)
+            {
+                week[Number(feed[i].availability[j])][Number(feed[i].availability[j + 1] + feed[i].availability[j + 2])] = true;
+            }
+
+            for (let j = 0; j < feed[i].booking.length; j+= 13)
+            {
+                let bookingString = feed[i].booking.substring(j, j + 13);
+                if (!checkDateRange(bookingString, 0))
+                {
+                    comparisonString += bookingString;
+                }
+                if (!checkDateRange(bookingString, 5))
+                {
+                    savedString += bookingString;
+                }
+            }
+            
+            for (let j = 1; j < comparisonString.length; j+=13)
+            {
+                for (let k = 0; k < 4; k++)
+                {
+                    week[Number(comparisonString[j])][Number(comparisonString[j + 1] + comparisonString[j + 2]) + k] = false;
+                }
+            }
+
+            const id = feed[i]._id;
+            const post = await Post.findByIdAndUpdate(id, {
+                booking: savedString,
+            }, { new: true });
+        
+            post.save();
+            //console.log(week);
             break;
         }
-    }*/
-  })
+    }
 
-/*
+    //console.log(week);
+
+    let dateObject = new Date();
+
+    let dayLightSavings = false;
+    const currentDate = new Date();
+    if (currentDate.getMonth() > 2 && currentDate.getMonth() < 10)
+    {
+        dayLightSavings = true;
+    }
+    else if (currentDate.getMonth() === 2 && (currentDate.getDate() - currentDate.getDay() > 7))
+    {
+        dayLightSavings = true;
+    }
+    else if (currentDate.getMonth() === 10 && (currentDate.getDate() - currentDate.getDay() <= 0))
+    {
+        dayLightSavings = true;
+    }
+
+    for (let i = dateObject.getDay() + 1; i < 7; i++)
+    {
+        for (let j = 0; j < 48; j++)
+        {
+            if (week[i][j])
+            {
+                if (j > 44)
+                {
+                    break;
+                }
+                let check = false;
+                for (k = 0; k < 4; k++)
+                {
+                    if (!week[i][j+k])
+                    {
+                        check = true;
+                        break;
+                    }
+                }
+                if (check)
+                {
+                    break;
+                }
+                let dayOfWeek = i;
+                //console.log(i);
+                dateObject = new Date();
+                //console.log(dateObject);
+                //console.log(dayOfWeek);
+                //console.log(currentDate.getDay());
+                if (dateObject.getDay() >= dayOfWeek)
+                {
+                    dayOfWeek += 7;
+                }
+                //console.log(dayOfWeek);
+                //console.log(currentDate.getDay());
+                if (dayOfWeek - dateObject.getDay() > 2)
+                {
+                    dateObject.setDate(dayOfWeek - dateObject.getDay() + dateObject.getDate());
+                    if (dayLightSavings && ((dayOffStart + 25200000 > Date.parse(dateObject)) || (Date.parse(dateObject) > dayOffEnd + 25200000)))
+                    {
+                        returnArray.push(dateObject.toDateString() + " at " + timeTable[j]);
+                    }
+                    else if (!dayLightSavings && ((dayOffStart + 28800000 > Date.parse(dateObject)) || (Date.parse(dateObject) > dayOffEnd + 28800000)))
+                    {
+                        returnArray.push(dateObject.toDateString() + " at " + timeTable[j]);
+                    }
+                    //console.log(futureDate.toDateString() + " at " + timeTable[j]);
+                }
+                else if (dayOfWeek - dateObject.getDay() === 2 && dateObject.getHours() < (j*0.25 + 8))
+                {
+                    dateObject.setDate(dayOfWeek - dateObject.getDay() + dateObject.getDate());
+                    if (dayLightSavings && ((dayOffStart + 25200000 > Date.parse(dateObject)) || (Date.parse(dateObject) > dayOffEnd + 25200000)))
+                    {
+                        returnArray.push(dateObject.toDateString() + " at " + timeTable[j]);
+                    }
+                    else if (!dayLightSavings && ((dayOffStart + 28800000 > Date.parse(dateObject)) || (Date.parse(dateObject) > dayOffEnd + 28800000)))
+                    {
+                        returnArray.push(dateObject.toDateString() + " at " + timeTable[j]);
+                    }
+                }
+            }
+        }
+    }
+
+    dateObject = new Date();
+
+    for (let i = 0; i < dateObject.getDay() + 1; i++)
+    {
+        for (let j = 0; j < 48; j++)
+        {
+            if (week[i][j])
+            {
+                if (j > 44)
+                {
+                    break;
+                }
+                let check = false;
+                for (k = 0; k < 4; k++)
+                {
+                    if (!week[i][j+k])
+                    {
+                        check = true;
+                        break;
+                    }
+                }
+                if (check)
+                {
+                    break;
+                }
+                let dayOfWeek = i;
+                //console.log(i);
+                const dateObject = new Date();
+                //console.log(dayOfWeek);
+                //console.log(currentDate.getDay());
+                if (dateObject.getDay() >= dayOfWeek)
+                {
+                    dayOfWeek += 7;
+                }
+                //console.log(dayOfWeek);
+                //console.log(currentDate.getDay());
+                if (dayOfWeek - dateObject.getDay() > 2)
+                {
+                    dateObject.setDate(dayOfWeek - dateObject.getDay() + dateObject.getDate());
+                    if (dayLightSavings && ((dayOffStart + 25200000 > Date.parse(dateObject)) || (Date.parse(dateObject) > dayOffEnd + 25200000)))
+                    {
+                        returnArray.push(dateObject.toDateString() + " at " + timeTable[j]);
+                    }
+                    else if (!dayLightSavings && ((dayOffStart + 28800000 > Date.parse(dateObject)) || (Date.parse(dateObject) > dayOffEnd + 28800000)))
+                    {
+                        returnArray.push(dateObject.toDateString() + " at " + timeTable[j]);
+                    }
+                }
+                else if (dayOfWeek - dateObject.getDay() === 2 && dateObject.getHours() < (j*0.25 + 8))
+                {
+                    dateObject.setDate(dayOfWeek - dateObject.getDay() + dateObject.getDate());
+                    if (dayLightSavings && ((dayOffStart + 25200000 > Date.parse(dateObject)) || (Date.parse(dateObject) > dayOffEnd + 25200000)))
+                    {
+                        returnArray.push(dateObject.toDateString() + " at " + timeTable[j]);
+                    }
+                    else if (!dayLightSavings && ((dayOffStart + 28800000 > Date.parse(dateObject)) || (Date.parse(dateObject) > dayOffEnd + 28800000)))
+                    {
+                        returnArray.push(dateObject.toDateString() + " at " + timeTable[j]);
+                    }
+                }
+            }
+        }
+    }
+    //console.log(week);
+
+    if (savedString.length / 13 >= maxHours)
+    {
+        returnArray = [];
+    }
+
+    res.json(returnArray);
+})
+
+app.post('/request/new', async (req, res) => {
+
+    const feed = await Post.find();
+
+    let memberEmail = "";
+
+    dateProcessor = dateEncoder(req.body.date);
+
+    for (let i = 0; i < feed.length; i++)
+    {
+        if (feed[i].member === req.body.tutor)
+        {
+            memberEmail = feed[i].email;
+            const id = feed[i]._id;
+            const booking = feed[i].booking;
+            try {
+                const post = await Post.findByIdAndUpdate(id, {
+                    booking: booking + dateProcessor,
+              }, { new: true });
+          
+              post.save();
+              
+            } catch (err) {
+              console.error(err);
+              //res.status(500).send('Server Error');
+            }
+            break;
+        }
+    }
+    const post = new Request({
+        student: req.body.student,
+        email: req.body.email,
+        phone: req.body.phone,
+        request: req.body.request,
+        tutor: req.body.tutor,
+        subject: req.body.subject,
+        date: req.body.date,
+        timestamp: Date(Date.now()),
+    });
+    
+    const message = "Dear " + req.body.tutor + ",\n\nYou have received a new appointment with " + req.body.student + ".\nBelow are the details:\n"
+    + "Student: " + req.body.student + "\n"
+    + "Email: " + req.body.email + "\n"
+    + "Subject: " + req.body.subject + "\n"
+    + "Date: " + req.body.date + "\n"
+    + "Phone: " + req.body.phone + "\n"
+    + "Request: " + req.body.request + "\n"
+    + "\nSincerely,\n" + tutoringChairs;
+
+    const options = {
+        from: "axstutoring@zohomail.com",
+        to: memberEmail,
+        subject: "AXS Tutoring - New Appointment",
+        text: message,
+    };
+    
+    await new Promise((resolve, reject) => {
+        transporter.sendMail(options, function (err, info){
+            if (err)
+            {
+                reject(err);
+            }
+            else
+            {
+                resolve("email sent");
+            }
+            //console.log("Sent", info.response);
+        });
+    })
+    /*
+    const message1 = "Dear " + req.body.student + ",\n\nThis is a confirmation of your request for tutoring with " 
+    + req.body.tutor + " on " + req.body.date + " for " + req.body.subject + ". Please email them" +  
+    " the materials that you would like to go over 24 hours before the scheduled appointment time at " + memberEmail +
+    ".\n\nAppointment ID: " + (post._id.toString()).substring((post._id.toString()).length - 5, (post._id.toString()).length) +
+    "\n\nThank you for choosing AXS Tutoring.\n\nSincerely,\n" + tutoringChairs
+    + "\n\n[Do not reply to this email. For all inquiries please contact us at tutoring.axsbg@gmail.com]";
+
+    const options1 = {
+        from: "axstutoring@zohomail.com",
+        to: req.body.email,
+        subject: "AXS Tutoring - Appointment Confirmation - " + (post._id.toString()).substring((post._id.toString()).length - 5, (post._id.toString()).length),
+        text: message1,
+    };
+    
+    await new Promise((resolve, reject) => {
+        transporter.sendMail(options1, function (err, info){
+            if (err)
+            {
+                reject(err);
+            }
+            else
+            {
+                resolve("email sent");
+            }
+            //console.log("Sent", info.response);
+        });
+    })
+    */
+
+    const feed1 = await Email.find();
+
+    let username = user(req.body.email);
+
+    for (let i = 0; i < feed1.length; i++)
+    {
+        if (feed1[i].email === username)
+        {
+            const id = feed1[i]._id;
+            const booking = feed1[i].bookings;
+            if (booking.length === 0 || booking[0] === "-")
+            {
+                const post1 = await Email.findByIdAndUpdate(id, {
+                    bookings: dateProcessor,
+                }, { new: true });
+              
+                post1.save();
+            }
+            else{
+                const post1 = await Email.findByIdAndUpdate(id, {
+                    bookings: booking + dateProcessor,
+                }, { new: true });
+              
+                post1.save();
+            }
+            
+        }
+    }
+
+    post.save();
+    res.json(post);
+})
+
 app.delete('/feed/delete/:_id', async (req, res) => {
     const result = await Post.findByIdAndDelete(req.params._id);
 
     res.json(result);
 })
-*/
 
 /*
 
@@ -1287,237 +1053,3 @@ const newPost = new Post({
 newPost.save();
 
 */
-
-app.get('/course', async (req, res) => {
-    const feed = await Course.find();
-    let returnArray = new Array(feed.length);
-    for (let i = 0; i < feed.length; i++)
-    {
-        returnArray[i] = feed[i].course;
-    }
-    res.json(returnArray);
-})
-
-app.get('/get/course/delete', async (req, res) => {
-    const feed = await Course.find();
-    let returnArray = new Array(feed.length);
-    for (let i = 0; i < feed.length; i++)
-    {
-        returnArray[i] = feed[i].course;
-    }
-
-    const feed2 = await Post.find();
-
-    for (let i = 0; i < feed.length; i++)
-    {
-        let flag = true;
-        let flag2 = true;
-        for (let j = 0; j < feed2.length; j++)
-        {
-            if (feed2[j].subject.includes(returnArray[i]))
-            {
-                flag = false;
-                if (feed2[j].maximumHours > 0)
-                {
-                    flag2 = false;
-                    break;
-                }
-            }
-        }
-        if (flag)
-        {
-            returnArray[i] += '(-)';
-        }
-        else if (flag2)
-        {
-            returnArray[i] += '(+)';
-        }
-    }
-    res.json(returnArray);
-})
-
-app.get('/members', async (req, res) => {
-    const feed = await Post.find();
-    let returnArray = [];
-    let idArray = new Array(feed.length);
-    let nameArray = new Array(feed.length);
-    for (let i = 0; i < feed.length; i++)
-    {
-        idArray[i] = feed[i]._id;
-        nameArray[i] = feed[i].member;
-    }
-    returnArray.push(idArray);
-    returnArray.push(nameArray);
-    res.json(returnArray);
-})
-
-/*
-function compare(a, b)
-{
-    firstDate = Date.parse(a.substring(4, 15));
-    secondDate = Date.parse(b.substring(4, 15));
-    //console.log(firstDate);
-    //console.log(secondDate);
-    if (firstDate > secondDate)
-    {
-        return true;
-    }
-    else
-    {
-        if (firstDate === secondDate)
-        {
-            //console.log(a.substring(a.length - 2, a.length));
-            //console.log(b.substring(b.length - 2, b.length));
-            if (a.substring(a.length - 2, a.length) > b.substring(b.length - 2, b.length))
-            {
-                return true;
-            }
-            else
-            {
-                if (a.substring(a.length - 2, a.length) === b.substring(b.length - 2, b.length))
-                {
-                    let firstHour = a.substring(19, 24);
-                    let secondHour = b.substring(19, 24);
-                    if (a.length === 26)
-                    {
-                        firstHour = "0" + a.substring(19, 23);
-                    }
-                    if (b.length === 26)
-                    {
-                        secondHour = "0" + b.substring(19, 23);
-                    }
-                    //console.log(firstHour);
-                    //console.log(secondHour);
-                    if (firstHour > secondHour)
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-*/
-
-app.get('/appointments', async (req, res) => {
-    const feed = await Request.find();
-    let returnArray = [];
-    for (let i = 0; i < feed.length; i++)
-    {
-        if (feed[i].tutor === req.query.member)
-        {
-            returnArray.push(feed[i]);
-        }
-    }
-
-    returnArray.sort((a, b) => {
-        firstDate = Date.parse(a.date.substring(4, 15));
-        secondDate = Date.parse(b.date.substring(4, 15));
-        //console.log(firstDate);
-        //console.log(secondDate);
-        if (firstDate > secondDate)
-        {
-            return 1;
-        }
-        else
-        {
-            if (firstDate === secondDate)
-            {
-                //console.log(a.substring(a.length - 2, a.length));
-                //console.log(b.substring(b.length - 2, b.length));
-                if (a.date.substring(a.date.length - 2, a.date.length) > b.date.substring(b.date.length - 2, b.date.length))
-                {
-                    return 1;
-                }
-                else
-                {
-                    if (a.date.substring(a.date.length - 2, a.date.length) === b.date.substring(b.date.length - 2, b.date.length))
-                    {
-                        let firstHour = a.date.substring(19, 24);
-                        let secondHour = b.date.substring(19, 24);
-                        if (a.date.length === 26)
-                        {
-                            firstHour = "0" + a.date.substring(19, 23);
-                        }
-                        if (b.date.length === 26)
-                        {
-                            secondHour = "0" + b.date.substring(19, 23);
-                        }
-                        //console.log(firstHour);
-                        //console.log(secondHour);
-                        if (firstHour > secondHour)
-                        {
-                            return 1;
-                        }
-                    }
-                }
-            }
-        }
-        return -1
-    })
-    res.json(returnArray);
-})
-
-app.get('/appointments/:id', async (req, res) => {
-    const feed = await Request.find();
-    const feed1 = await Post.findById(req.params.id);
-    let returnArray = [];
-    for (let i = 0; i < feed.length; i++)
-    {
-        if (feed[i].tutor === feed1.member)
-        {
-            returnArray.push(feed[i]);
-        }
-    }
-
-    returnArray.sort((a, b) => {
-        firstDate = Date.parse(a.date.substring(4, 15));
-        secondDate = Date.parse(b.date.substring(4, 15));
-        //console.log(firstDate);
-        //console.log(secondDate);
-        if (firstDate > secondDate)
-        {
-            return 1;
-        }
-        else
-        {
-            if (firstDate === secondDate)
-            {
-                //console.log(a.substring(a.length - 2, a.length));
-                //console.log(b.substring(b.length - 2, b.length));
-                if (a.date.substring(a.date.length - 2, a.date.length) > b.date.substring(b.date.length - 2, b.date.length))
-                {
-                    return 1;
-                }
-                else
-                {
-                    if (a.date.substring(a.date.length - 2, a.date.length) === b.date.substring(b.date.length - 2, b.date.length))
-                    {
-                        let firstHour = a.date.substring(19, 24);
-                        let secondHour = b.date.substring(19, 24);
-                        if (a.date.length === 26)
-                        {
-                            firstHour = "0" + a.date.substring(19, 23);
-                        }
-                        if (b.date.length === 26)
-                        {
-                            secondHour = "0" + b.date.substring(19, 23);
-                        }
-                        //console.log(firstHour);
-                        //console.log(secondHour);
-                        if (firstHour > secondHour)
-                        {
-                            return 1;
-                        }
-                    }
-                }
-            }
-        }
-        return -1
-    })
-    let newReturnArray = new Array;
-    newReturnArray.push(feed1.member);
-    newReturnArray.push(returnArray);
-    res.json(newReturnArray);
-})

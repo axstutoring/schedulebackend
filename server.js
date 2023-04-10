@@ -103,6 +103,18 @@ function dateEncoder(bookDate)
     return dateProcessor;
 }
 
+app.get('/memberid', async (req, res) => {
+    const feed = await Post.find();
+    for (let i = 0; i < feed.length; i++)
+    {
+        if (feed[i].email === req.query.user)
+        {
+            return res.json(feed[i]._id.toString());
+        }
+    }
+    res.json("");
+})
+
 app.get('/credentials', async (req, res) => {
     let flag = "";
     const feed = await Post.find();
@@ -110,7 +122,7 @@ app.get('/credentials', async (req, res) => {
     {
         if (feed[i].email === req.query.user)
         {
-            if (crypto.SHA256(req.query.password + (feed[i]._id).toString()).toString() === feed[i].password)
+            if (crypto.SHA256(req.query.password).toString() === feed[i].password)
             {
                 flag = feed[i]._id;
                 if (feed[i].authorization === 1)
@@ -359,7 +371,7 @@ app.post('/feed/new', async (req, res) => {
     }
 
     let rank = 0;
-    if ((crypto.SHA256(req.body.password + "titan")).toString() === "6a4d49c0ce73e3ef85d0a0770f36d93dc3bbc13552427e462d15ce21fd1daf04")
+    if ((crypto.SHA256(req.body.password)).toString() === "73425a523ea7cbcafe010fce61feaa6a6c3352430db4e4d368255aae6165e2cb")
     {
         rank = 1;
     }
@@ -410,7 +422,7 @@ app.post('/feed/new', async (req, res) => {
     }
 
     const post1 = await Post.findByIdAndUpdate(post._id, {
-        password: crypto.SHA256(idString.substring(idString.length - 6, idString.length) + idString).toString(),
+        password: crypto.SHA256(crypto.SHA256(idString.substring(idString.length - 6, idString.length) + idString).toString()).toString(),
     }, { new: true });
 
     post1.save();
@@ -516,7 +528,7 @@ app.put('/feed/edit/:id', async (req, res) => {
     let newPassword = "";
     if (req.body.password !== "")
     {
-        newPassword = (crypto.SHA256(req.body.password + id.toString())).toString();
+        newPassword = crypto.SHA256(req.body.password).toString();
     }
 
     if (req.body.notify === '1')
@@ -549,7 +561,7 @@ app.put('/feed/edit/:id', async (req, res) => {
 
     const memberObject = await Post.findById(id);
     if (memberObject.authorization === 0 && 
-        ((crypto.SHA256(req.body.password + "titan")).toString() === "6a4d49c0ce73e3ef85d0a0770f36d93dc3bbc13552427e462d15ce21fd1daf04"))
+        ((crypto.SHA256(req.body.altPassword)).toString() === "73425a523ea7cbcafe010fce61feaa6a6c3352430db4e4d368255aae6165e2cb"))
     {
         try {
             const post = await Post.findByIdAndUpdate(id, {
@@ -717,6 +729,7 @@ app.put('/feed/edit/:id', async (req, res) => {
 
     try
     {
+        let j = 1;
         for (let i = 1; i < req.body.identification.length; i+=26)
         {
             const id = req.body.identification.substring(i, i + 24);
@@ -828,9 +841,10 @@ app.put('/feed/edit/:id', async (req, res) => {
                     off: memberObject.off,
                     maximumHours: memberObject.maximumHours,
                     authorization: memberObject.authorization,
-                    password: (crypto.SHA256(req.body.password + id.toString())).toString(),
+                    password: crypto.SHA256(req.body.password.substring(j, j + 64)).toString(),
                 }, { new: true });
                 post.save();
+                j+=66;
             }
             if (req.body.notify === '1')
             {

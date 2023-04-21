@@ -15,22 +15,26 @@ const transporter = nodemailer.createTransport( {
     }
 });
 
-mongoose.set('strictQuery', false);
+const connectDB = async () => {
+    mongoose.set('strictQuery', false);
 
-mongoose
-    .connect (connection, 
-        {
-            useNewUrlParser: true,
-            useUnifiedTopology: true,
-        })
-        .then(() => console.log("Connected to DB"))
-        .catch(console.error);
+    await mongoose
+        .connect (connection, 
+            {
+                useNewUrlParser: true,
+                useUnifiedTopology: true,
+            })
+            .then(() => console.log("Connected to DB"))
+            .catch(console.error);
+}
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-app.listen(8080, () => {console.log("Server listening on port 8080");})
+connectDB().then(() => {
+    app.listen(8080, () => {console.log("Server listening on port 8080");});
+})
 
 const Post = require("./models/post");
 const Course = require("./models/course");

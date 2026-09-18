@@ -14,6 +14,9 @@ const BookingSchema = new Schema({
   duration: Number,     // minutes
   location: String,
   topics: String,
+  // false until the tutor confirms the session; students see it as "pending"
+  // until then.
+  confirmed: { type: Boolean, default: false },
 }, { timestamps: true });
 
 // Atomic backstop: MongoDB enforces this even if two requests for the exact

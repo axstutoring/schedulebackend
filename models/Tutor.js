@@ -27,6 +27,11 @@ const TutorSchema = new Schema({
   // immediately; self-signup (POST /api/auth/tutor/signup) explicitly sets
   // this to false so new applicants wait for admin approval.
   isApproved: { type: Boolean, default: true },
+  // Cumulative count of sessions this tutor has cancelled. At 3, onHold is
+  // set automatically and they're removed from the public bookable list
+  // until an admin clears it.
+  cancelCount: { type: Number, default: 0 },
+  onHold: { type: Boolean, default: false },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Tutor', TutorSchema);

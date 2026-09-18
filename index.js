@@ -44,6 +44,10 @@ function sendMail(options) {
   });
 }
 
+function isUclaEmail(email) {
+  return typeof email === 'string' && email.toLowerCase().trim().endsWith('@g.ucla.edu');
+}
+
 // ---- Models ----
 const Student = require('./models/Student');
 const Tutor = require('./models/Tutor');
@@ -99,6 +103,9 @@ app.post('/api/auth/student/signup', async (req, res) => {
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
+    if (!isUclaEmail(email)) {
+      return res.status(400).json({ error: 'Please use your @g.ucla.edu email address to sign up' });
+    }
     if (password.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
@@ -141,6 +148,9 @@ app.post('/api/auth/tutor/signup', async (req, res) => {
     const { name, email, password, subjects } = req.body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (!isUclaEmail(email)) {
+      return res.status(400).json({ error: 'Please use your @g.ucla.edu email address to sign up' });
     }
     if (password.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
@@ -287,7 +297,7 @@ app.get('/api/students/me', requireAuth('student'), async (req, res) => {
   const student = await Student.findById(req.auth.userId).select('-password');
   if (!student) return res.status(404).json({ error: 'Student not found' });
   const bookings = await Booking.find({ studentEmail: student.email }).sort({ createdAt: -1 });
-  res.json({ name: student.name, email: student.email, bookings });
+  res.json({ name: student.name, email: student.email, bookings, onHold: !!student.onHold, cancelCount: student.cancelCount || 0 });
 });
 
 app.delete('/api/students/me', requireAuth('student'), async (req, res) => {
@@ -311,6 +321,12 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
   try {
     const student = await Student.findById(req.auth.userId);
     if (!student) return res.status(404).json({ error: 'Student not found' });
+
+    if (student.onHold) {
+      return res.status(403).json({
+        error: 'Your account is on hold due to repeated cancellations. Please message the tutoring chairs to resolve this before booking again.',
+      });
+    }
 
     const { tutorEmail, date, startTime, endTime } = req.body;
 
@@ -336,6 +352,7 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
         ...req.body,
         studentName: student.name,
         studentEmail: student.email,
+        confirmed: false,
       });
     } catch (createErr) {
       if (createErr.code === 11000) {
@@ -345,10 +362,7 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
       throw createErr;
     }
 
-    // Email confirmations, using the admin-configurable template if one exists.
-    const templateSetting = await Setting.findOne({ key: 'confirmationEmailTemplate' });
-    const template = templateSetting?.value || DEFAULT_CONFIRMATION_TEMPLATE;
-    const filled = fillTemplate(template, {
+    const templateVars = {
       studentName: student.name,
       class: booking.class,
       tutor: booking.tutor,
@@ -359,22 +373,24 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
       duration: formatDuration(booking.duration),
       location: booking.location,
       topics: booking.topics,
-    });
+    };
 
+    const studentTemplate = await getEmailTemplate('bookingCreatedStudent');
     await sendMail({
       from: 'axstutoring@zohomail.com',
       to: student.email,
-      subject: 'AXS Tutoring - Appointment Confirmation',
-      text: filled,
-    }).catch((e) => console.error('confirmation email failed', e));
+      subject: 'AXS Tutoring - Booking Request Received',
+      text: fillTemplate(studentTemplate, templateVars),
+    }).catch((e) => console.error('student booking-created email failed', e));
 
     if (booking.tutorEmail) {
+      const tutorTemplate = await getEmailTemplate('bookingCreatedTutor');
       await sendMail({
         from: 'axstutoring@zohomail.com',
         to: booking.tutorEmail,
-        subject: 'AXS Tutoring - New Appointment',
-        text: `Dear ${booking.tutor},\n\nYou have a new tutoring session booked.\n\nStudent: ${student.name}\nEmail: ${student.email}\nClass: ${booking.class}\nDate: ${booking.date}\nTime: ${booking.startTime} - ${booking.endTime}\nLocation: ${booking.location}\nTopics: ${booking.topics}\n\nSincerely,\n${tutoringChairs}`,
-      }).catch((e) => console.error('tutor notification email failed', e));
+        subject: 'AXS Tutoring - New Session Request (Action Needed)',
+        text: fillTemplate(tutorTemplate, templateVars),
+      }).catch((e) => console.error('tutor booking-created email failed', e));
     }
 
     res.status(201).json({ success: true, booking });
@@ -388,6 +404,105 @@ app.delete('/api/bookings/:id', requireAuth('student'), async (req, res) => {
   const booking = await Booking.findById(req.params.id);
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
   if (booking.studentEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
+
+  const student = await Student.findById(req.auth.userId);
+  if (student) {
+    student.cancelCount = (student.cancelCount || 0) + 1;
+    if (student.cancelCount >= 3) student.onHold = true;
+    await student.save();
+  }
+
+  if (booking.tutorEmail) {
+    const template = await getEmailTemplate('bookingCancelledByStudent');
+    const filled = fillTemplate(template, {
+      studentName: booking.studentName,
+      class: booking.class,
+      tutor: booking.tutor,
+      tutorEmail: booking.tutorEmail,
+      date: booking.date,
+      startTime: booking.startTime,
+      endTime: booking.endTime,
+      duration: formatDuration(booking.duration),
+      location: booking.location,
+      topics: booking.topics,
+    });
+    await sendMail({
+      from: 'axstutoring@zohomail.com',
+      to: booking.tutorEmail,
+      subject: 'AXS Tutoring - Session Cancelled',
+      text: filled,
+    }).catch((e) => console.error('cancellation email (to tutor) failed', e));
+  }
+
+  await Booking.deleteOne({ _id: booking._id });
+  res.json({ success: true, message: 'Booking cancelled' });
+});
+
+// Tutor confirms a pending booking request.
+app.put('/api/tutors/me/bookings/:id/confirm', requireAuth('tutor'), async (req, res) => {
+  const booking = await Booking.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (booking.tutorEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
+
+  booking.confirmed = true;
+  await booking.save();
+
+  const template = await getEmailTemplate('bookingConfirmed');
+  const filled = fillTemplate(template, {
+    studentName: booking.studentName,
+    class: booking.class,
+    tutor: booking.tutor,
+    tutorEmail: booking.tutorEmail,
+    date: booking.date,
+    startTime: booking.startTime,
+    endTime: booking.endTime,
+    duration: formatDuration(booking.duration),
+    location: booking.location,
+    topics: booking.topics,
+  });
+  await sendMail({
+    from: 'axstutoring@zohomail.com',
+    to: booking.studentEmail,
+    subject: 'AXS Tutoring - Your Session is Confirmed',
+    text: filled,
+  }).catch((e) => console.error('confirmation email (to student) failed', e));
+
+  res.json(booking);
+});
+
+// Tutor cancels one of their own sessions.
+app.delete('/api/tutors/me/bookings/:id', requireAuth('tutor'), async (req, res) => {
+  const booking = await Booking.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (booking.tutorEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
+
+  const tutor = await Tutor.findById(req.auth.userId);
+  if (tutor) {
+    tutor.cancelCount = (tutor.cancelCount || 0) + 1;
+    if (tutor.cancelCount >= 3) tutor.onHold = true;
+    await tutor.save();
+  }
+
+  const template = await getEmailTemplate('bookingCancelledByTutor');
+  const filled = fillTemplate(template, {
+    studentName: booking.studentName,
+    class: booking.class,
+    tutor: booking.tutor,
+    tutorEmail: booking.tutorEmail,
+    date: booking.date,
+    startTime: booking.startTime,
+    endTime: booking.endTime,
+    duration: formatDuration(booking.duration),
+    location: booking.location,
+    topics: booking.topics,
+  });
+  await sendMail({
+    from: 'axstutoring@zohomail.com',
+    to: booking.studentEmail,
+    subject: 'AXS Tutoring - Session Cancelled',
+    text: filled,
+  }).catch((e) => console.error('cancellation email (to student) failed', e));
+
   await Booking.deleteOne({ _id: booking._id });
   res.json({ success: true, message: 'Booking cancelled' });
 });
@@ -404,9 +519,22 @@ app.get('/api/admin/students', requireAuth('admin'), async (req, res) => {
       createdAt: s.createdAt,
       bookingCount,
       latestBooking: latestBooking ? { class: latestBooking.class, date: latestBooking.date } : null,
+      cancelCount: s.cancelCount || 0,
+      onHold: !!s.onHold,
     };
   }));
   res.json(results);
+});
+
+// Admin manually clears (or sets) a student's hold status — e.g. after
+// they've messaged the tutoring chairs and the situation is resolved.
+app.put('/api/admin/students/:studentId/hold', requireAuth('admin'), async (req, res) => {
+  const student = await Student.findById(req.params.studentId);
+  if (!student) return res.status(404).json({ error: 'Student not found' });
+  student.onHold = !!req.body.onHold;
+  if (!student.onHold) student.cancelCount = 0;
+  await student.save();
+  res.json({ success: true, onHold: student.onHold });
 });
 
 app.delete('/api/admin/students/:studentId', requireAuth('admin'), async (req, res) => {
@@ -442,9 +570,9 @@ app.get('/api/tutors/:tutorId/booked-slots', async (req, res) => {
 });
 
 app.get('/api/tutors', async (req, res) => {
-  // Public listing (used for the booking flow) only shows approved tutors —
-  // a pending applicant shouldn't be bookable yet.
-  const tutors = await Tutor.find({ isApproved: true }).select('-password');
+  // Public listing (used for the booking flow) only shows approved, non-held
+  // tutors — a pending applicant or a tutor on hold shouldn't be bookable.
+  const tutors = await Tutor.find({ isApproved: true, onHold: { $ne: true } }).select('-password');
   res.json(tutors);
 });
 
@@ -603,16 +731,51 @@ app.post('/api/review-sessions/:id/rsvp', async (req, res) => {
 });
 
 // ============================================================
-// Admin: email template
+// Admin: email templates
 // ============================================================
 
-const DEFAULT_CONFIRMATION_TEMPLATE = `Dear {{studentName}},
+const DEFAULT_EMAIL_TEMPLATES = {
+  bookingCreatedStudent: `Dear {{studentName}},
 
-Your tutoring session has been confirmed!
+Thanks for booking a tutoring session! Your request has been sent to your tutor and is awaiting their confirmation — you'll get another email as soon as they confirm.
 
 Session Details:
 - Class: {{class}}
-- Tutor: {{tutor}} ({{tutorEmail}})
+- Tutor: {{tutor}}
+- Date: {{date}}
+- Time: {{startTime}} - {{endTime}}
+- Duration: {{duration}}
+- Location: {{location}}
+- Topics: {{topics}}
+
+Best regards,
+Alpha Chi Sigma Tutoring Team`,
+
+  bookingCreatedTutor: `Dear {{tutor}},
+
+You have a new tutoring session request awaiting your confirmation.
+
+Session Details:
+- Student: {{studentName}}
+- Class: {{class}}
+- Date: {{date}}
+- Time: {{startTime}} - {{endTime}}
+- Duration: {{duration}}
+- Location: {{location}}
+- Topics: {{topics}}
+
+Please log in to your tutor dashboard to confirm this session.
+
+Best regards,
+Alpha Chi Sigma Tutoring Team`,
+
+  bookingConfirmed: `Dear {{studentName}},
+
+Good news — {{tutor}} has confirmed your tutoring session!
+
+Session Details:
+- Class: {{class}}
+- Tutor: {{tutor}}
 - Date: {{date}}
 - Time: {{startTime}} - {{endTime}}
 - Duration: {{duration}}
@@ -622,7 +785,41 @@ Session Details:
 We look forward to seeing you!
 
 Best regards,
-Alpha Chi Sigma Tutoring Team`;
+Alpha Chi Sigma Tutoring Team`,
+
+  bookingCancelledByStudent: `Dear {{tutor}},
+
+{{studentName}} has cancelled the following tutoring session:
+
+- Class: {{class}}
+- Date: {{date}}
+- Time: {{startTime}} - {{endTime}}
+
+No action is needed on your end.
+
+Best regards,
+Alpha Chi Sigma Tutoring Team`,
+
+  bookingCancelledByTutor: `Dear {{studentName}},
+
+Your tutor, {{tutor}}, has cancelled the following tutoring session:
+
+- Class: {{class}}
+- Date: {{date}}
+- Time: {{startTime}} - {{endTime}}
+
+Please rebook with another tutor if you'd still like help with this class.
+
+Best regards,
+Alpha Chi Sigma Tutoring Team`,
+};
+
+const EMAIL_TEMPLATE_KEYS = Object.keys(DEFAULT_EMAIL_TEMPLATES);
+
+async function getEmailTemplate(key) {
+  const setting = await Setting.findOne({ key: `emailTemplate:${key}` });
+  return setting?.value || DEFAULT_EMAIL_TEMPLATES[key];
+}
 
 function fillTemplate(template, vars) {
   return Object.entries(vars).reduce(
@@ -640,15 +837,22 @@ function formatDuration(minutes) {
   return `${hours} hr ${mins} min`;
 }
 
-app.get('/api/admin/email-template', requireAuth('admin'), async (req, res) => {
-  const setting = await Setting.findOne({ key: 'confirmationEmailTemplate' });
-  res.json({ template: setting?.value || DEFAULT_CONFIRMATION_TEMPLATE });
+app.get('/api/admin/email-templates', requireAuth('admin'), async (req, res) => {
+  const templates = {};
+  for (const key of EMAIL_TEMPLATE_KEYS) {
+    templates[key] = await getEmailTemplate(key);
+  }
+  res.json(templates);
 });
 
-app.put('/api/admin/email-template', requireAuth('admin'), async (req, res) => {
+app.put('/api/admin/email-templates', requireAuth('admin'), async (req, res) => {
+  const { key, template } = req.body;
+  if (!EMAIL_TEMPLATE_KEYS.includes(key)) {
+    return res.status(400).json({ error: 'Unknown template key' });
+  }
   await Setting.findOneAndUpdate(
-    { key: 'confirmationEmailTemplate' },
-    { value: req.body.template },
+    { key: `emailTemplate:${key}` },
+    { value: template },
     { upsert: true },
   );
   res.json({ success: true });

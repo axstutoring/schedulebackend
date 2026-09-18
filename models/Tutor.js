@@ -23,6 +23,10 @@ const TutorSchema = new Schema({
   },
   unavailableDates: { type: [String], default: [] }, // ISO date strings, e.g. "2026-04-20"
   isAdmin: { type: Boolean, default: false },
+  // Defaults true so admin-created tutors (POST /api/admin/tutors) are active
+  // immediately; self-signup (POST /api/auth/tutor/signup) explicitly sets
+  // this to false so new applicants wait for admin approval.
+  isApproved: { type: Boolean, default: true },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Tutor', TutorSchema);

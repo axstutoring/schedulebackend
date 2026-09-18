@@ -157,11 +157,14 @@ app.post('/api/auth/tutor/signup', async (req, res) => {
       email: email.toLowerCase(),
       password: hashed,
       subjects: subjects || [],
+      isApproved: false,
     });
 
-    const token = createToken({ userId: tutor._id.toString(), email: tutor.email, type: 'tutor', isAdmin: false });
-    const { password: _pw, ...tutorData } = tutor.toObject();
-    res.status(201).json({ success: true, token, tutor: tutorData });
+    res.status(201).json({
+      success: true,
+      pendingApproval: true,
+      message: 'Your application has been submitted and is awaiting admin approval.',
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -248,6 +251,10 @@ app.post('/api/auth/tutor/signin', async (req, res) => {
 
     const isMatch = await bcrypt.compare(password || '', tutor.password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid email or password' });
+
+    if (!tutor.isApproved) {
+      return res.status(403).json({ error: 'Your account is still awaiting admin approval.' });
+    }
 
     const token = createToken({ userId: tutor._id.toString(), email: tutor.email, type: 'tutor', isAdmin: tutor.isAdmin });
     const { password: _pw, ...tutorData } = tutor.toObject();
@@ -435,6 +442,14 @@ app.get('/api/tutors/:tutorId/booked-slots', async (req, res) => {
 });
 
 app.get('/api/tutors', async (req, res) => {
+  // Public listing (used for the booking flow) only shows approved tutors —
+  // a pending applicant shouldn't be bookable yet.
+  const tutors = await Tutor.find({ isApproved: true }).select('-password');
+  res.json(tutors);
+});
+
+app.get('/api/admin/tutors', requireAuth('admin'), async (req, res) => {
+  // Admin sees everyone, including tutors still awaiting approval.
   const tutors = await Tutor.find({}).select('-password');
   res.json(tutors);
 });

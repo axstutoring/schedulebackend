@@ -713,6 +713,29 @@ app.delete('/api/admin/tutors/:tutorId', requireAuth('admin'), async (req, res) 
 // Classes
 // ============================================================
 
+// ============================================================
+// Announcement (homepage banner)
+// ============================================================
+
+app.get('/api/announcement', async (req, res) => {
+  const setting = await Setting.findOne({ key: 'announcement' });
+  res.json({ html: setting?.value || '' });
+});
+
+app.get('/api/admin/announcement', requireAuth('admin'), async (req, res) => {
+  const setting = await Setting.findOne({ key: 'announcement' });
+  res.json({ html: setting?.value || '' });
+});
+
+app.put('/api/admin/announcement', requireAuth('admin'), async (req, res) => {
+  await Setting.findOneAndUpdate(
+    { key: 'announcement' },
+    { value: req.body.html || '' },
+    { upsert: true },
+  );
+  res.json({ success: true });
+});
+
 app.get('/api/classes', async (req, res) => {
   const doc = await Classes.findOne({});
   if (!doc) return res.json({});

@@ -9,6 +9,7 @@ const BookingSchema = new Schema({
   studentName: String,
   studentEmail: { type: String, required: true, lowercase: true, trim: true },
   date: String,         // display date, e.g. "Mon Apr 14"
+  dateISO: String,       // "2026-04-14" — needed for reliable date-range queries, since `date` has no year
   startTime: String,    // "9:00 AM"
   endTime: String,      // "10:00 AM"
   duration: Number,     // minutes

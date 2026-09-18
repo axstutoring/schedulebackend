@@ -556,6 +556,52 @@ app.get('/api/admin/bookings', requireAuth('admin'), async (req, res) => {
   res.json(bookings);
 });
 
+// Counts, per tutor, how many sessions were actually tutored within a date
+// range: the session's date has passed and it wasn't cancelled. Cancelling
+// deletes the booking record entirely, so any booking that still exists with
+// a past date/time automatically qualifies.
+app.get('/api/admin/tutoring-report', requireAuth('admin'), async (req, res) => {
+  const { startDate, endDate } = req.query;
+  if (!startDate || !endDate) {
+    return res.status(400).json({ error: 'startDate and endDate are required (YYYY-MM-DD)' });
+  }
+
+  const bookings = await Booking.find({
+    dateISO: { $gte: startDate, $lte: endDate },
+  });
+
+  const now = new Date();
+  const counts = {};
+
+  for (const booking of bookings) {
+    if (!booking.dateISO) continue;
+    const [y, m, d] = booking.dateISO.split('-').map(Number);
+    const sessionEnd = new Date(y, m - 1, d);
+    const match = (booking.endTime || '').trim().match(/^(\d+):(\d+)\s*(AM|PM)$/i);
+    if (match) {
+      let hour = parseInt(match[1]);
+      const minute = parseInt(match[2]);
+      const period = match[3].toUpperCase();
+      if (period === 'AM' && hour === 12) hour = 0;
+      if (period === 'PM' && hour !== 12) hour += 12;
+      sessionEnd.setHours(hour, minute, 0, 0);
+    } else {
+      sessionEnd.setHours(23, 59, 59, 999); // no parseable time — treat end-of-day as a fallback
+    }
+
+    if (sessionEnd >= now) continue; // hasn't happened yet — doesn't count
+
+    const name = booking.tutor || 'Unknown';
+    counts[name] = (counts[name] || 0) + 1;
+  }
+
+  const rows = Object.entries(counts)
+    .map(([tutor, sessionsCompleted]) => ({ tutor, sessionsCompleted }))
+    .sort((a, b) => a.tutor.localeCompare(b.tutor));
+
+  res.json({ startDate, endDate, rows });
+});
+
 // ============================================================
 // Tutors
 // ============================================================

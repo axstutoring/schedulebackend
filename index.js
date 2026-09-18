@@ -406,7 +406,9 @@ app.delete('/api/bookings/:id', requireAuth('student'), async (req, res) => {
   if (booking.studentEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
 
   const student = await Student.findById(req.auth.userId);
-  if (student) {
+  if (student && booking.confirmed) {
+    // Only a confirmed session actually being cancelled counts as a real
+    // cancellation — backing out of a still-pending request doesn't.
     student.cancelCount = (student.cancelCount || 0) + 1;
     if (student.cancelCount >= 3) student.onHold = true;
     await student.save();
@@ -661,6 +663,19 @@ app.put('/api/tutors/me/classes', requireAuth('tutor'), async (req, res) => {
   const tutor = await Tutor.findByIdAndUpdate(
     req.auth.userId,
     { classesITeach: req.body.classesITeach },
+    { new: true },
+  ).select('-password');
+  res.json(tutor);
+});
+
+// Tutor puts themself on/off hold — e.g. going on vacation. While on hold
+// they're excluded from the public bookable-tutor list, but nothing about
+// their account is deleted or changed otherwise. Distinct from the
+// automatic 3-strike hold: this doesn't touch cancelCount either way.
+app.put('/api/tutors/me/hold', requireAuth('tutor'), async (req, res) => {
+  const tutor = await Tutor.findByIdAndUpdate(
+    req.auth.userId,
+    { onHold: !!req.body.onHold },
     { new: true },
   ).select('-password');
   res.json(tutor);

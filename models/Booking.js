@@ -13,8 +13,24 @@ const BookingSchema = new Schema({
   startTime: String,    // "9:00 AM"
   endTime: String,      // "10:00 AM"
   duration: Number,     // minutes
-  location: String,
+  sessionType: { type: String, enum: ['in-person', 'online'], default: 'in-person' },
+  location: String,     // in-person: the chosen location name; online: "Online (Zoom)"
+  // true when `location` came from the tutor's preferredLocations list
+  // (pre-approved by definition); false when the student typed a custom
+  // "Other" location — the tutor sees it flagged on the pending session and
+  // confirming the session doubles as approving that location.
+  locationApproved: { type: Boolean, default: true },
+  // Snapshot of the tutor's Zoom link at booking time (online sessions
+  // only). Never sent to the student in the API response or in emails
+  // until `confirmed` is true — see the booking routes.
+  zoomLink: String,
   topics: String,
+  // Optional single PDF the student attaches with the booking request
+  // (e.g. a problem set) — stored inline as base64, matching this project's
+  // "keep the database the same, no new infra" constraint.
+  attachmentName: String,
+  attachmentType: String,
+  attachmentData: String, // base64
   // false until the tutor confirms the session; students see it as "pending"
   // until then.
   confirmed: { type: Boolean, default: false },

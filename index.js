@@ -17,7 +17,10 @@ const connectDB = async () => {
 };
 
 const app = express();
-app.use(express.json());
+// Default body-size limit (100kb) is too small for a base64-encoded PDF
+// attachment on a booking — 11mb comfortably covers the 8MB decoded cap
+// enforced in the booking route, plus base64's ~33% size overhead.
+app.use(express.json({ limit: '11mb' }));
 app.use(cors());
 
 connectDB().then(() => {
@@ -170,6 +173,26 @@ app.post('/api/auth/tutor/signup', async (req, res) => {
       isApproved: false,
     });
 
+    // Let the admin know a new tutor is waiting on approval — otherwise the
+    // only way to notice is checking the dashboard unprompted.
+    // Must be awaited: on Vercel, the function can be frozen the instant the
+    // HTTP response is sent, so a fire-and-forget promise here has no
+    // guarantee of ever completing (matches the awaited pattern every other
+    // email in this file already uses).
+    if (process.env.ADMIN_EMAIL) {
+      try {
+        const template = await getEmailTemplate('newTutorApplication');
+        await sendMail({
+          from: 'axstutoring@zohomail.com',
+          to: process.env.ADMIN_EMAIL,
+          subject: `New Tutor Application — ${tutor.name}`,
+          text: fillTemplate(template, { tutorName: tutor.name, tutorEmail: tutor.email }),
+        });
+      } catch (e) {
+        console.error('new tutor application email failed', e);
+      }
+    }
+
     res.status(201).json({
       success: true,
       pendingApproval: true,
@@ -253,6 +276,78 @@ app.post('/api/auth/student/reset-password', async (req, res) => {
   }
 });
 
+app.post('/api/auth/tutor/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const tutor = await Tutor.findOne({ email: (email || '').toLowerCase() });
+    if (!tutor) return res.status(404).json({ error: 'No account exists with this email address' });
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    tutor.resetCodeHash = await bcrypt.hash(code, 10);
+    tutor.resetCodeExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await tutor.save();
+
+    await sendMail({
+      from: 'axstutoring@zohomail.com',
+      to: tutor.email,
+      subject: 'AXS Tutoring - Password Reset Code',
+      text: `Dear ${tutor.name},\n\nYour password reset code is: ${code}\n\nThis code expires in 10 minutes.\n\nIf you didn't request this, you can safely ignore this email.\n\nSincerely,\n${tutoringChairs}`,
+    }).catch((e) => console.error('reset code email failed', e));
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/auth/tutor/verify-code', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    const tutor = await Tutor.findOne({ email: (email || '').toLowerCase() });
+    if (!tutor || !tutor.resetCodeHash || !tutor.resetCodeExpiresAt) {
+      return res.status(400).json({ error: 'Please request a new verification code' });
+    }
+    if (tutor.resetCodeExpiresAt < new Date()) {
+      return res.status(400).json({ error: 'Your verification code has expired' });
+    }
+    const isMatch = await bcrypt.compare(code || '', tutor.resetCodeHash);
+    if (!isMatch) return res.status(400).json({ error: 'Incorrect verification code' });
+
+    const resetToken = createToken({ userId: tutor._id.toString(), email: tutor.email, type: 'tutor-password-reset' });
+    res.json({ success: true, resetToken });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/auth/tutor/reset-password', async (req, res) => {
+  try {
+    const { resetToken, password } = req.body;
+    const decoded = verifyToken(resetToken);
+    if (!decoded || decoded.type !== 'tutor-password-reset') {
+      return res.status(401).json({ error: 'Reset session expired — please start again' });
+    }
+    if (!password || password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const tutor = await Tutor.findById(decoded.userId);
+    if (!tutor) return res.status(404).json({ error: 'Tutor not found' });
+
+    tutor.password = await bcrypt.hash(password, 10);
+    tutor.resetCodeHash = undefined;
+    tutor.resetCodeExpiresAt = undefined;
+    await tutor.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.post('/api/auth/tutor/signin', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -296,7 +391,15 @@ app.post('/api/auth/admin/signin', async (req, res) => {
 app.get('/api/students/me', requireAuth('student'), async (req, res) => {
   const student = await Student.findById(req.auth.userId).select('-password');
   if (!student) return res.status(404).json({ error: 'Student not found' });
-  const bookings = await Booking.find({ studentEmail: student.email }).sort({ createdAt: -1 });
+  const rawBookings = await Booking.find({ studentEmail: student.email }).sort({ createdAt: -1 });
+  // Zoom link stays hidden from the student until the tutor confirms — same
+  // rule as GET /api/bookings/me, which this dashboard-profile route
+  // duplicates for convenience.
+  const bookings = rawBookings.map((b) => {
+    const obj = b.toObject();
+    if (!obj.confirmed) delete obj.zoomLink;
+    return obj;
+  });
   res.json({ name: student.name, email: student.email, bookings, onHold: !!student.onHold, cancelCount: student.cancelCount || 0 });
 });
 
@@ -314,8 +417,111 @@ app.delete('/api/students/me', requireAuth('student'), async (req, res) => {
 
 app.get('/api/bookings/me', requireAuth('student'), async (req, res) => {
   const bookings = await Booking.find({ studentEmail: req.auth.email }).sort({ createdAt: -1 });
-  res.json(bookings);
+  // Zoom link stays hidden from the student until the tutor confirms.
+  const result = bookings.map((b) => {
+    const obj = b.toObject();
+    if (!obj.confirmed) delete obj.zoomLink;
+    return obj;
+  });
+  res.json(result);
 });
+
+// ---- Booking rule helpers (reservation window + weekly/monthly caps) ----
+// "startTime" strings look like "2:30 PM" — convert to 24-hour {hour, minute}.
+function parseClockTime(timeStr) {
+  const match = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec((timeStr || '').trim());
+  if (!match) return null;
+  let hour = parseInt(match[1], 10);
+  const minute = parseInt(match[2], 10);
+  const period = match[3].toUpperCase();
+  if (period === 'PM' && hour !== 12) hour += 12;
+  if (period === 'AM' && hour === 12) hour = 0;
+  return { hour, minute };
+}
+
+// Builds a real Date for a session's start from its dateISO ("YYYY-MM-DD")
+// and startTime ("2:30 PM"). Uses local Date-component construction (not
+// ISO-string parsing) so it stays internally consistent with `new Date()`
+// for "now", regardless of what timezone the server happens to run in.
+function getSessionStartDate(dateISO, startTime) {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateISO || '');
+  const clock = parseClockTime(startTime);
+  if (!parts || !clock) return null;
+  const [, year, month, day] = parts;
+  return new Date(Number(year), Number(month) - 1, Number(day), clock.hour, clock.minute);
+}
+
+const LATE_CANCELLATION_MS = 24 * 60 * 60 * 1000; // cancelling with 24h+ notice doesn't count as a strike
+
+// A cancellation only counts toward the 3-strike hold if it happens less
+// than 24 hours before the session was due to start. If we can't tell when
+// the session starts (missing/malformed date or time), fail safe and treat
+// it as late, matching the pre-existing "always counts" behavior.
+function isLateCancellation(booking) {
+  const sessionStart = getSessionStartDate(booking.dateISO, booking.startTime);
+  if (!sessionStart) return true;
+  return sessionStart.getTime() - Date.now() < LATE_CANCELLATION_MS;
+}
+
+// "2:30 PM" -> minutes since midnight, for numeric overlap comparisons.
+// Display time strings like these do NOT compare correctly as plain
+// strings — "9:30 AM" is lexicographically greater than "10:00 AM" (since
+// '9' > '1' as the first character), even though 9:30 AM is earlier in
+// real time — so anything checking overlap between two clock times needs
+// to go through this first rather than comparing the strings directly.
+function clockTimeToMinutes(timeStr) {
+  const clock = parseClockTime(timeStr);
+  return clock ? clock.hour * 60 + clock.minute : null;
+}
+
+function toISODateString(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// Sunday-Saturday calendar week containing dateISO, as [startISO, endISO).
+function getWeekRange(dateISO) {
+  const [year, month, day] = dateISO.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  const dayOfWeek = date.getDay(); // 0 = Sunday
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate() - dayOfWeek);
+  const end = new Date(date.getFullYear(), date.getMonth(), date.getDate() - dayOfWeek + 7);
+  return { startISO: toISODateString(start), endISO: toISODateString(end) };
+}
+
+// Calendar month containing dateISO, as [startISO, endISO).
+function getMonthRange(dateISO) {
+  const [year, month] = dateISO.split('-').map(Number);
+  const start = new Date(year, month - 1, 1);
+  const end = new Date(year, month, 1);
+  return { startISO: toISODateString(start), endISO: toISODateString(end) };
+}
+
+const RESERVATION_MAX_DURATION_MINUTES = 60;
+const RESERVATION_MIN_LEAD_MS = 2 * 24 * 60 * 60 * 1000; // closes 2 days before session start
+const RESERVATION_MAX_LEAD_MS = 7 * 24 * 60 * 60 * 1000; // can't book more than 7 days out
+const WEEKLY_BOOKING_LIMIT = 2;
+const MONTHLY_BOOKING_LIMIT = 4;
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024; // 8MB decoded
+
+// A booking's "location" line for an email: online sessions don't reveal the
+// Zoom link to the student until the tutor confirms (revealZoom controls
+// this); an unapproved custom in-person location is flagged so whoever's
+// reading knows confirming the session also approves that location.
+function formatLocationForEmail(booking, { revealZoom }) {
+  if (booking.sessionType === 'online') {
+    if (revealZoom && booking.zoomLink) {
+      return `Online — Zoom link: ${booking.zoomLink}`;
+    }
+    return 'Online (Zoom link is sent once the tutor confirms the session)';
+  }
+  if (!booking.locationApproved) {
+    return `${booking.location} (pending tutor approval — confirming the session also approves this location)`;
+  }
+  return booking.location;
+}
 
 app.post('/api/bookings', requireAuth('student'), async (req, res) => {
   try {
@@ -328,7 +534,101 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
       });
     }
 
-    const { tutorEmail, date, startTime, endTime } = req.body;
+    const { tutorEmail, date, startTime, endTime, dateISO, duration } = req.body;
+
+    // ---- Reservation window: opens 7 days out, closes 2 days before start ----
+    if (dateISO && startTime) {
+      const sessionStart = getSessionStartDate(dateISO, startTime);
+      if (sessionStart) {
+        const msUntilSession = sessionStart.getTime() - Date.now();
+        if (msUntilSession < RESERVATION_MIN_LEAD_MS) {
+          return res.status(400).json({
+            error: 'Booking for this session has closed — sessions must be booked at least 2 days before they start.',
+          });
+        }
+        if (msUntilSession > RESERVATION_MAX_LEAD_MS) {
+          return res.status(400).json({
+            error: 'That session is too far out — sessions can only be booked up to 7 days in advance.',
+          });
+        }
+      }
+    }
+
+    // ---- Duration cap: sessions are at most 1 hour ----
+    if (duration && duration > RESERVATION_MAX_DURATION_MINUTES) {
+      return res.status(400).json({ error: 'Sessions can be at most 1 hour long.' });
+    }
+
+    // ---- Weekly / monthly booking limits ----
+    if (dateISO) {
+      const { startISO: weekStart, endISO: weekEnd } = getWeekRange(dateISO);
+      const weekCount = await Booking.countDocuments({
+        studentEmail: student.email,
+        dateISO: { $gte: weekStart, $lt: weekEnd },
+      });
+      if (weekCount >= WEEKLY_BOOKING_LIMIT) {
+        return res.status(400).json({
+          error: `You already have ${WEEKLY_BOOKING_LIMIT} sessions booked that week — that's the weekly limit. Cancel one first if you need to rebook.`,
+        });
+      }
+
+      const { startISO: monthStart, endISO: monthEnd } = getMonthRange(dateISO);
+      const monthCount = await Booking.countDocuments({
+        studentEmail: student.email,
+        dateISO: { $gte: monthStart, $lt: monthEnd },
+      });
+      if (monthCount >= MONTHLY_BOOKING_LIMIT) {
+        return res.status(400).json({
+          error: `You already have ${MONTHLY_BOOKING_LIMIT} sessions booked that month — that's the monthly limit. Cancel one first if you need to rebook.`,
+        });
+      }
+    }
+
+    // ---- Session type, location, and Zoom validation ----
+    // Looked up server-side rather than trusted from the client, so a
+    // student can't fake an already-approved location or invent a Zoom
+    // link for a tutor who hasn't set one up.
+    const tutor = tutorEmail ? await Tutor.findOne({ email: tutorEmail.toLowerCase() }) : null;
+
+    const sessionType = req.body.sessionType === 'online' ? 'online' : 'in-person';
+    let location = '';
+    let locationApproved = true;
+    let zoomLink = '';
+
+    if (sessionType === 'online') {
+      if (!tutor || !tutor.zoomLink) {
+        return res.status(400).json({
+          error: "This tutor hasn't set up a Zoom link yet — please choose an in-person session instead.",
+        });
+      }
+      location = 'Online (Zoom)';
+      zoomLink = tutor.zoomLink;
+    } else {
+      location = (req.body.location || '').trim();
+      if (!location) {
+        return res.status(400).json({ error: 'Please choose a location for your in-person session.' });
+      }
+      // Approved automatically only if it's literally one of the tutor's
+      // preferred locations; anything else (the student's own "Other" text)
+      // needs the tutor to approve it, which happens when they confirm.
+      locationApproved = !!tutor?.preferredLocations?.includes(location);
+    }
+
+    // ---- Optional PDF attachment ----
+    let attachmentName, attachmentType, attachmentData;
+    if (req.body.attachment && req.body.attachment.data) {
+      const { filename, mimeType, data } = req.body.attachment;
+      if (mimeType !== 'application/pdf') {
+        return res.status(400).json({ error: 'Only PDF files can be attached.' });
+      }
+      const approxBytes = (data.length * 3) / 4; // base64 -> decoded byte estimate
+      if (approxBytes > MAX_ATTACHMENT_BYTES) {
+        return res.status(400).json({ error: 'That file is too large — attachments must be 8MB or smaller.' });
+      }
+      attachmentName = (filename || 'attachment.pdf').slice(0, 200);
+      attachmentType = mimeType;
+      attachmentData = data;
+    }
 
     // Server-side conflict check: the frontend only shows free slots based on
     // what it saw when the page loaded, so this is the actual source of truth.
@@ -336,11 +636,18 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
     // slot race; this covers overlapping-but-different-start-time conflicts.)
     if (tutorEmail && date && startTime && endTime) {
       const sameDayBookings = await Booking.find({ tutorEmail, date });
-      const overlaps = sameDayBookings.some((existing) => (
-        (startTime >= existing.startTime && startTime < existing.endTime) ||
-        (endTime > existing.startTime && endTime <= existing.endTime) ||
-        (startTime <= existing.startTime && endTime >= existing.endTime)
-      ));
+      const newStartMin = clockTimeToMinutes(startTime);
+      const newEndMin = clockTimeToMinutes(endTime);
+      const overlaps = newStartMin !== null && newEndMin !== null && sameDayBookings.some((existing) => {
+        const existingStartMin = clockTimeToMinutes(existing.startTime);
+        const existingEndMin = clockTimeToMinutes(existing.endTime);
+        if (existingStartMin === null || existingEndMin === null) return false;
+        return (
+          (newStartMin >= existingStartMin && newStartMin < existingEndMin) ||
+          (newEndMin > existingStartMin && newEndMin <= existingEndMin) ||
+          (newStartMin <= existingStartMin && newEndMin >= existingEndMin)
+        );
+      });
       if (overlaps) {
         return res.status(409).json({ error: 'That time slot was just booked by someone else — please pick another.' });
       }
@@ -352,6 +659,13 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
         ...req.body,
         studentName: student.name,
         studentEmail: student.email,
+        sessionType,
+        location,
+        locationApproved,
+        zoomLink,
+        attachmentName,
+        attachmentType,
+        attachmentData,
         confirmed: false,
       });
     } catch (createErr) {
@@ -371,7 +685,6 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
       startTime: booking.startTime,
       endTime: booking.endTime,
       duration: formatDuration(booking.duration),
-      location: booking.location,
       topics: booking.topics,
     };
 
@@ -380,7 +693,8 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
       from: 'axstutoring@zohomail.com',
       to: student.email,
       subject: 'AXS Tutoring - Booking Request Received',
-      text: fillTemplate(studentTemplate, templateVars),
+      // The student doesn't see the Zoom link until the tutor confirms.
+      text: fillTemplate(studentTemplate, { ...templateVars, location: formatLocationForEmail(booking, { revealZoom: false }) }),
     }).catch((e) => console.error('student booking-created email failed', e));
 
     if (booking.tutorEmail) {
@@ -389,11 +703,15 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
         from: 'axstutoring@zohomail.com',
         to: booking.tutorEmail,
         subject: 'AXS Tutoring - New Session Request (Action Needed)',
-        text: fillTemplate(tutorTemplate, templateVars),
+        // It's the tutor's own Zoom link, so no reason to withhold it from them.
+        text: fillTemplate(tutorTemplate, { ...templateVars, location: formatLocationForEmail(booking, { revealZoom: true }) }),
       }).catch((e) => console.error('tutor booking-created email failed', e));
     }
 
-    res.status(201).json({ success: true, booking });
+    // Strip the Zoom link from the response too — it's unconfirmed, so the
+    // student shouldn't see it yet even in the raw API response.
+    const { zoomLink: _zoomLink, ...bookingForResponse } = booking.toObject();
+    res.status(201).json({ success: true, booking: bookingForResponse });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -406,11 +724,15 @@ app.delete('/api/bookings/:id', requireAuth('student'), async (req, res) => {
   if (booking.studentEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
 
   const student = await Student.findById(req.auth.userId);
-  if (student && booking.confirmed) {
-    // Only a confirmed session actually being cancelled counts as a real
-    // cancellation — backing out of a still-pending request doesn't.
+  if (student && booking.confirmed && isLateCancellation(booking)) {
+    // Only a confirmed session, cancelled with less than 24 hours' notice,
+    // counts as a real cancellation — backing out of a still-pending
+    // request, or cancelling well ahead of time, doesn't.
     student.cancelCount = (student.cancelCount || 0) + 1;
-    if (student.cancelCount >= 3) student.onHold = true;
+    if (student.cancelCount >= 3) {
+      student.onHold = true;
+      student.holdReason = 'strikes';
+    }
     await student.save();
   }
 
@@ -440,6 +762,18 @@ app.delete('/api/bookings/:id', requireAuth('student'), async (req, res) => {
   res.json({ success: true, message: 'Booking cancelled' });
 });
 
+// Student edits the topics for their own session (before or after it happens).
+app.put('/api/bookings/:id/topics', requireAuth('student'), async (req, res) => {
+  const booking = await Booking.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (booking.studentEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
+  booking.topics = (req.body.topics || '').trim();
+  await booking.save();
+  const bookingForResponse = booking.toObject();
+  if (!bookingForResponse.confirmed) delete bookingForResponse.zoomLink; // stays consistent with GET /api/bookings/me
+  res.json(bookingForResponse);
+});
+
 // Tutor confirms a pending booking request.
 app.put('/api/tutors/me/bookings/:id/confirm', requireAuth('tutor'), async (req, res) => {
   const booking = await Booking.findById(req.params.id);
@@ -447,6 +781,10 @@ app.put('/api/tutors/me/bookings/:id/confirm', requireAuth('tutor'), async (req,
   if (booking.tutorEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
 
   booking.confirmed = true;
+  // Confirming the session also approves its location — if the student
+  // picked "Other" and typed something custom, the tutor saw it flagged on
+  // this pending request, and confirming means they're fine with it.
+  booking.locationApproved = true;
   await booking.save();
 
   const template = await getEmailTemplate('bookingConfirmed');
@@ -459,7 +797,8 @@ app.put('/api/tutors/me/bookings/:id/confirm', requireAuth('tutor'), async (req,
     startTime: booking.startTime,
     endTime: booking.endTime,
     duration: formatDuration(booking.duration),
-    location: booking.location,
+    // The student gets the real Zoom link now that the session is confirmed.
+    location: formatLocationForEmail(booking, { revealZoom: true }),
     topics: booking.topics,
   });
   await sendMail({
@@ -479,9 +818,15 @@ app.delete('/api/tutors/me/bookings/:id', requireAuth('tutor'), async (req, res)
   if (booking.tutorEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
 
   const tutor = await Tutor.findById(req.auth.userId);
-  if (tutor) {
+  if (tutor && booking.confirmed && isLateCancellation(booking)) {
+    // Only counts if the tutor had already accepted the session and is now
+    // backing out with less than 24 hours' notice — declining/cancelling a
+    // still-pending request, or cancelling well ahead of time, doesn't.
     tutor.cancelCount = (tutor.cancelCount || 0) + 1;
-    if (tutor.cancelCount >= 3) tutor.onHold = true;
+    if (tutor.cancelCount >= 3) {
+      tutor.onHold = true;
+      tutor.holdReason = 'strikes';
+    }
     await tutor.save();
   }
 
@@ -509,6 +854,17 @@ app.delete('/api/tutors/me/bookings/:id', requireAuth('tutor'), async (req, res)
   res.json({ success: true, message: 'Booking cancelled' });
 });
 
+// Tutor edits the topics for one of their own sessions — e.g. logging what
+// was actually covered after the session happens.
+app.put('/api/tutors/me/bookings/:id/topics', requireAuth('tutor'), async (req, res) => {
+  const booking = await Booking.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (booking.tutorEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
+  booking.topics = (req.body.topics || '').trim();
+  await booking.save();
+  res.json(booking);
+});
+
 app.get('/api/admin/students', requireAuth('admin'), async (req, res) => {
   const students = await Student.find({}).select('-password').sort({ createdAt: -1 });
   const results = await Promise.all(students.map(async (s) => {
@@ -523,6 +879,7 @@ app.get('/api/admin/students', requireAuth('admin'), async (req, res) => {
       latestBooking: latestBooking ? { class: latestBooking.class, date: latestBooking.date } : null,
       cancelCount: s.cancelCount || 0,
       onHold: !!s.onHold,
+      holdReason: s.holdReason || null,
     };
   }));
   res.json(results);
@@ -533,10 +890,12 @@ app.get('/api/admin/students', requireAuth('admin'), async (req, res) => {
 app.put('/api/admin/students/:studentId/hold', requireAuth('admin'), async (req, res) => {
   const student = await Student.findById(req.params.studentId);
   if (!student) return res.status(404).json({ error: 'Student not found' });
-  student.onHold = !!req.body.onHold;
-  if (!student.onHold) student.cancelCount = 0;
+  const wantsOn = !!req.body.onHold;
+  student.onHold = wantsOn;
+  student.holdReason = wantsOn ? 'admin' : null;
+  if (!wantsOn) student.cancelCount = 0;
   await student.save();
-  res.json({ success: true, onHold: student.onHold });
+  res.json({ success: true, onHold: student.onHold, holdReason: student.holdReason, cancelCount: student.cancelCount });
 });
 
 app.delete('/api/admin/students/:studentId', requireAuth('admin'), async (req, res) => {
@@ -668,17 +1027,54 @@ app.put('/api/tutors/me/classes', requireAuth('tutor'), async (req, res) => {
   res.json(tutor);
 });
 
-// Tutor puts themself on/off hold — e.g. going on vacation. While on hold
-// they're excluded from the public bookable-tutor list, but nothing about
-// their account is deleted or changed otherwise. Distinct from the
-// automatic 3-strike hold: this doesn't touch cancelCount either way.
-app.put('/api/tutors/me/hold', requireAuth('tutor'), async (req, res) => {
+// The tutor's own list of in-person locations they're willing to meet at —
+// a mix of picks from the admin's master list and their own free-typed
+// "Other" entries. Stored flat; students see exactly this list when
+// booking an in-person session with this tutor.
+app.put('/api/tutors/me/locations', requireAuth('tutor'), async (req, res) => {
+  const locations = Array.isArray(req.body.preferredLocations) ? req.body.preferredLocations : [];
   const tutor = await Tutor.findByIdAndUpdate(
     req.auth.userId,
-    { onHold: !!req.body.onHold },
+    { preferredLocations: locations },
     { new: true },
   ).select('-password');
   res.json(tutor);
+});
+
+app.put('/api/tutors/me/zoom', requireAuth('tutor'), async (req, res) => {
+  const tutor = await Tutor.findByIdAndUpdate(
+    req.auth.userId,
+    { zoomLink: (req.body.zoomLink || '').trim() },
+    { new: true },
+  ).select('-password');
+  res.json(tutor);
+});
+
+// Tutor puts themself on/off hold — e.g. going on vacation. While on hold
+// they're excluded from the public bookable-tutor list, but nothing about
+// their account is deleted or changed otherwise. A tutor can only turn OFF
+// a hold they put on themselves — a hold set by an admin, or the automatic
+// 3-strike hold, can only be released by an admin.
+app.put('/api/tutors/me/hold', requireAuth('tutor'), async (req, res) => {
+  const wantsOn = !!req.body.onHold;
+  const tutor = await Tutor.findById(req.auth.userId);
+  if (!tutor) return res.status(404).json({ error: 'Tutor not found' });
+
+  if (!wantsOn && tutor.onHold && tutor.holdReason && tutor.holdReason !== 'self') {
+    const reasonText = tutor.holdReason === 'strikes'
+      ? 'due to repeated cancellations'
+      : 'by an admin';
+    return res.status(403).json({
+      error: `Your hold was set ${reasonText} and can only be released by an admin. Please message the tutoring chairs.`,
+    });
+  }
+
+  tutor.onHold = wantsOn;
+  tutor.holdReason = wantsOn ? 'self' : null;
+  await tutor.save();
+
+  const { password: _pw, ...tutorData } = tutor.toObject();
+  res.json(tutorData);
 });
 
 // ============================================================
@@ -713,9 +1109,56 @@ app.post('/api/admin/tutors', requireAuth('admin'), async (req, res) => {
 app.put('/api/admin/tutors/:tutorId', requireAuth('admin'), async (req, res) => {
   const updates = { ...req.body };
   delete updates.password; // password changes go through a dedicated flow, not this endpoint
+  // Hold status goes through the dedicated /hold endpoint below, which also
+  // manages holdReason and cancelCount consistently — never through this
+  // generic field-update route.
+  delete updates.onHold;
+  delete updates.holdReason;
+  delete updates.cancelCount;
+
+  // Read the pre-update approval state so we can tell an actual
+  // not-approved -> approved transition apart from any other edit to an
+  // already-approved tutor (which shouldn't re-send the email).
+  const before = await Tutor.findById(req.params.tutorId).select('isApproved');
+  if (!before) return res.status(404).json({ error: 'Tutor not found' });
+
   const tutor = await Tutor.findByIdAndUpdate(req.params.tutorId, updates, { new: true }).select('-password');
   if (!tutor) return res.status(404).json({ error: 'Tutor not found' });
+
+  // Awaited for the same reason as the new-application email above — a
+  // fire-and-forget promise isn't guaranteed to survive past the response
+  // on Vercel's serverless runtime.
+  if (!before.isApproved && tutor.isApproved) {
+    try {
+      const template = await getEmailTemplate('tutorApproved');
+      await sendMail({
+        from: 'axstutoring@zohomail.com',
+        to: tutor.email,
+        subject: 'AXS Tutoring — Your Tutor Application Has Been Approved',
+        text: fillTemplate(template, { tutorName: tutor.name }),
+      });
+    } catch (e) {
+      console.error('tutor approval email failed', e);
+    }
+  }
+
   res.json(tutor);
+});
+
+// Admin manually holds/releases a tutor — for taking manual action outside
+// the automatic 3-strike system, or to release a strike-triggered hold.
+// Unlike the tutor's own /me/hold toggle, this always succeeds regardless
+// of who/what set the current hold.
+app.put('/api/admin/tutors/:tutorId/hold', requireAuth('admin'), async (req, res) => {
+  const tutor = await Tutor.findById(req.params.tutorId);
+  if (!tutor) return res.status(404).json({ error: 'Tutor not found' });
+  const wantsOn = !!req.body.onHold;
+  tutor.onHold = wantsOn;
+  tutor.holdReason = wantsOn ? 'admin' : null;
+  if (!wantsOn) tutor.cancelCount = 0;
+  await tutor.save();
+  const { password: _pw, ...tutorData } = tutor.toObject();
+  res.json(tutorData);
 });
 
 app.delete('/api/admin/tutors/:tutorId', requireAuth('admin'), async (req, res) => {
@@ -770,6 +1213,25 @@ app.put('/api/admin/classes', requireAuth('admin'), async (req, res) => {
 });
 
 // ============================================================
+// Locations (admin-managed master list, for in-person sessions)
+// ============================================================
+
+app.get('/api/locations', async (req, res) => {
+  const setting = await Setting.findOne({ key: 'locations' });
+  res.json(setting?.value || []);
+});
+
+app.put('/api/admin/locations', requireAuth('admin'), async (req, res) => {
+  const locations = Array.isArray(req.body.locations) ? req.body.locations : [];
+  await Setting.findOneAndUpdate(
+    { key: 'locations' },
+    { value: locations },
+    { upsert: true },
+  );
+  res.json(locations);
+});
+
+// ============================================================
 // Review Sessions
 // ============================================================
 
@@ -795,21 +1257,26 @@ app.delete('/api/admin/review-sessions/:id', requireAuth('admin'), async (req, r
   res.json({ success: true });
 });
 
-app.post('/api/review-sessions/:id/rsvp', async (req, res) => {
-  const { name, subject, email } = req.body;
-  if (!name || !subject) return res.status(400).json({ error: 'name and subject are required' });
+// RSVPing now requires a signed-in student account — name and email come
+// from the authenticated student record, never from the request body, so
+// there's no "just type any name" path anymore.
+app.post('/api/review-sessions/:id/rsvp', requireAuth('student'), async (req, res) => {
+  const { subject } = req.body;
+  if (!subject) return res.status(400).json({ error: 'subject is required' });
+
+  const student = await Student.findById(req.auth.userId).select('name email');
+  if (!student) return res.status(404).json({ error: 'Student not found' });
 
   const session = await ReviewSession.findById(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
   const alreadyRsvpd = (session.attendees || []).some((a) => {
-    if (typeof a === 'string') return a === name;
-    if (email) return a.email === email && a.subject === subject;
-    return a.name === name && a.subject === subject;
+    if (typeof a === 'string') return a === student.name;
+    return a.email === student.email && a.subject === subject;
   });
   if (alreadyRsvpd) return res.status(400).json({ error: "Already RSVP'd for this subject" });
 
-  session.attendees.push({ name, subject, ...(email ? { email } : {}) });
+  session.attendees.push({ name: student.name, subject, email: student.email });
   await session.save();
   res.json(session);
 });
@@ -893,6 +1360,24 @@ Your tutor, {{tutor}}, has cancelled the following tutoring session:
 - Time: {{startTime}} - {{endTime}}
 
 Please rebook with another tutor if you'd still like help with this class.
+
+Best regards,
+Alpha Chi Sigma Tutoring Team`,
+
+  newTutorApplication: `Hi,
+
+A new tutor has applied for an account and is awaiting approval.
+
+Name: {{tutorName}}
+Email: {{tutorEmail}}
+
+Log in to the admin dashboard to review and approve or reject this application.
+
+— AXS Tutoring Website`,
+
+  tutorApproved: `Dear {{tutorName}},
+
+Great news — your tutor application has been approved! You can now sign in to your tutor dashboard, set your weekly availability and the classes you tutor, and start getting booked for sessions.
 
 Best regards,
 Alpha Chi Sigma Tutoring Team`,

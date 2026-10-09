@@ -439,16 +439,40 @@ function parseClockTime(timeStr) {
   return { hour, minute };
 }
 
-// Builds a real Date for a session's start from its dateISO ("YYYY-MM-DD")
-// and startTime ("2:30 PM"). Uses local Date-component construction (not
-// ISO-string parsing) so it stays internally consistent with `new Date()`
-// for "now", regardless of what timezone the server happens to run in.
+// Every session time in the app is a Pacific (UCLA) wall-clock time, and this
+// server can run in any time zone (Vercel runs UTC), so convert Pacific
+// wall-clock values to real instants explicitly rather than relying on the
+// server's own zone.
+const PACIFIC_TZ = 'America/Los_Angeles';
+
+// How far Pacific time is from UTC (negative) at a given instant, in ms.
+function pacificOffsetMs(instantMs) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: PACIFIC_TZ,
+    hourCycle: 'h23',
+    year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric',
+  }).formatToParts(new Date(instantMs));
+  const n = (type) => Number(parts.find((p) => p.type === type).value);
+  const asUtc = Date.UTC(n('year'), n('month') - 1, n('day'), n('hour'), n('minute'), n('second'));
+  return asUtc - Math.floor(instantMs / 1000) * 1000;
+}
+
+// The real instant at which the Pacific wall clock reads y-m-d hour:minute.
+function pacificWallTimeToDate(year, month, day, hour = 0, minute = 0) {
+  const guess = Date.UTC(year, month - 1, day, hour, minute);
+  const first = guess - pacificOffsetMs(guess);
+  return new Date(guess - pacificOffsetMs(first)); // second pass settles DST edges
+}
+
+// Builds the real instant a session starts from its dateISO ("YYYY-MM-DD")
+// and startTime ("2:30 PM"), both in Pacific time.
 function getSessionStartDate(dateISO, startTime) {
   const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateISO || '');
   const clock = parseClockTime(startTime);
   if (!parts || !clock) return null;
   const [, year, month, day] = parts;
-  return new Date(Number(year), Number(month) - 1, Number(day), clock.hour, clock.minute);
+  return pacificWallTimeToDate(Number(year), Number(month), Number(day), clock.hour, clock.minute);
 }
 
 const LATE_CANCELLATION_MS = 24 * 60 * 60 * 1000; // cancelling with 24h+ notice doesn't count as a strike
@@ -505,17 +529,30 @@ const RESERVATION_MAX_LEAD_MS = 7 * 24 * 60 * 60 * 1000; // can't book more than
 const WEEKLY_BOOKING_LIMIT = 2;
 const MONTHLY_BOOKING_LIMIT = 4;
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024; // 8MB decoded
+const MAX_WEEKLY_HOURS_CEILING = 10; // highest value a tutor can pick for maxHoursPerWeek
 
 // A booking's "location" line for an email: online sessions don't reveal the
 // Zoom link to the student until the tutor confirms (revealZoom controls
 // this); an unapproved custom in-person location is flagged so whoever's
-// reading knows confirming the session also approves that location.
+// reading knows confirming the session also approves that location. A
+// booking made before the tutor had a Zoom link / location set has neither
+// yet — the tutor has to supply it when they confirm.
 function formatLocationForEmail(booking, { revealZoom }) {
   if (booking.sessionType === 'online') {
     if (revealZoom && booking.zoomLink) {
       return `Online — Zoom link: ${booking.zoomLink}`;
     }
-    return 'Online (Zoom link is sent once the tutor confirms the session)';
+    if (revealZoom) {
+      return 'Online (you will be asked to add your Zoom link when you confirm the session)';
+    }
+    return booking.zoomLink
+      ? 'Online (Zoom link is sent once the tutor confirms the session)'
+      : 'Online (the tutor will send you the Zoom link when they confirm the session)';
+  }
+  if (!booking.location) {
+    return revealZoom
+      ? 'In person (you will be asked to enter the meeting location when you confirm the session)'
+      : 'In person (the tutor will send you the meeting location when they confirm the session)';
   }
   if (!booking.locationApproved) {
     return `${booking.location} (pending tutor approval — confirming the session also approves this location)`;
@@ -596,22 +633,41 @@ app.post('/api/bookings', requireAuth('student'), async (req, res) => {
     let zoomLink = '';
 
     if (sessionType === 'online') {
-      if (!tutor || !tutor.zoomLink) {
-        return res.status(400).json({
-          error: "This tutor hasn't set up a Zoom link yet — please choose an in-person session instead.",
-        });
-      }
+      // A tutor without a Zoom link can still be booked: the booking just
+      // carries no link, and the tutor has to enter one to confirm it.
       location = 'Online (Zoom)';
-      zoomLink = tutor.zoomLink;
+      zoomLink = tutor?.zoomLink || '';
     } else {
       location = (req.body.location || '').trim();
-      if (!location) {
+      const tutorHasLocations = (tutor?.preferredLocations || []).length > 0;
+      if (!location && tutorHasLocations) {
         return res.status(400).json({ error: 'Please choose a location for your in-person session.' });
       }
-      // Approved automatically only if it's literally one of the tutor's
-      // preferred locations; anything else (the student's own "Other" text)
-      // needs the tutor to approve it, which happens when they confirm.
-      locationApproved = !!tutor?.preferredLocations?.includes(location);
+      // No location at all is fine only when the tutor hasn't set any
+      // preferred locations — the tutor then supplies one when confirming.
+      // Otherwise it's approved automatically only if it's literally one of
+      // the tutor's preferred locations; anything else (the student's own
+      // "Other" text) needs the tutor to approve it, which happens when they
+      // confirm.
+      locationApproved = !!location && !!tutor?.preferredLocations?.includes(location);
+    }
+
+    // ---- Tutor's weekly hour cap ----
+    // Counts every booking the tutor already has that week (pending and
+    // confirmed alike) plus this one against the cap they set.
+    if (tutor && dateISO) {
+      const maxHours = tutor.maxHoursPerWeek || MAX_WEEKLY_HOURS_CEILING;
+      const { startISO: tWeekStart, endISO: tWeekEnd } = getWeekRange(dateISO);
+      const tutorWeekBookings = await Booking.find({
+        tutorEmail: { $in: [tutor.email, tutorEmail].filter(Boolean) },
+        dateISO: { $gte: tWeekStart, $lt: tWeekEnd },
+      }).select('duration');
+      const bookedMinutes = tutorWeekBookings.reduce((sum, b) => sum + (b.duration || 0), 0);
+      if (bookedMinutes + (duration || 0) > maxHours * 60) {
+        return res.status(400).json({
+          error: "This tutor has reached their maximum tutoring hours for that week — please pick a different week or tutor.",
+        });
+      }
     }
 
     // ---- Optional PDF attachment ----
@@ -780,6 +836,34 @@ app.put('/api/tutors/me/bookings/:id/confirm', requireAuth('tutor'), async (req,
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
   if (booking.tutorEmail !== req.auth.email) return res.status(403).json({ error: 'Forbidden' });
 
+  // A session booked before the tutor had a Zoom link / location set has
+  // neither yet, so the tutor has to supply it here to confirm. A value sent
+  // in the request wins; otherwise fall back to what's already on the booking
+  // (or, for Zoom, the link the tutor has since added to their profile).
+  if (booking.sessionType === 'online') {
+    const tutor = await Tutor.findById(req.auth.userId).select('zoomLink');
+    const zoomLink = (req.body?.zoomLink || '').trim() || booking.zoomLink || tutor?.zoomLink || '';
+    if (!zoomLink) {
+      return res.status(400).json({
+        error: 'Please enter your Zoom link to confirm this online session.',
+        code: 'ZOOM_LINK_REQUIRED',
+      });
+    }
+    if (!/^https?:\/\//i.test(zoomLink)) {
+      return res.status(400).json({ error: 'The Zoom link must start with http:// or https://' });
+    }
+    booking.zoomLink = zoomLink;
+  } else {
+    const location = (req.body?.location || '').trim() || (booking.location || '').trim();
+    if (!location) {
+      return res.status(400).json({
+        error: 'Please enter the meeting location to confirm this in-person session.',
+        code: 'LOCATION_REQUIRED',
+      });
+    }
+    booking.location = location;
+  }
+
   booking.confirmed = true;
   // Confirming the session also approves its location — if the student
   // picked "Other" and typed something custom, the tutor saw it flagged on
@@ -937,17 +1021,17 @@ app.get('/api/admin/tutoring-report', requireAuth('admin'), async (req, res) => 
   for (const booking of bookings) {
     if (!booking.dateISO) continue;
     const [y, m, d] = booking.dateISO.split('-').map(Number);
-    const sessionEnd = new Date(y, m - 1, d);
     const match = (booking.endTime || '').trim().match(/^(\d+):(\d+)\s*(AM|PM)$/i);
+    let sessionEnd;
     if (match) {
       let hour = parseInt(match[1]);
       const minute = parseInt(match[2]);
       const period = match[3].toUpperCase();
       if (period === 'AM' && hour === 12) hour = 0;
       if (period === 'PM' && hour !== 12) hour += 12;
-      sessionEnd.setHours(hour, minute, 0, 0);
+      sessionEnd = pacificWallTimeToDate(y, m, d, hour, minute);
     } else {
-      sessionEnd.setHours(23, 59, 59, 999); // no parseable time — treat end-of-day as a fallback
+      sessionEnd = pacificWallTimeToDate(y, m, d, 23, 59); // no parseable time — treat end-of-day as a fallback
     }
 
     if (sessionEnd >= now) continue; // hasn't happened yet — doesn't count
@@ -967,12 +1051,13 @@ app.get('/api/admin/tutoring-report', requireAuth('admin'), async (req, res) => 
 // Tutors
 // ============================================================
 
-// Public: just the date/time info needed to avoid double-booking a tutor —
-// deliberately excludes student names/emails/topics.
+// Public: just the date/time info needed to avoid double-booking a tutor
+// (and to total up their week against their max-hours cap) — deliberately
+// excludes student names/emails/topics.
 app.get('/api/tutors/:tutorId/booked-slots', async (req, res) => {
   const tutor = await Tutor.findById(req.params.tutorId);
   if (!tutor) return res.status(404).json({ error: 'Tutor not found' });
-  const bookings = await Booking.find({ tutorEmail: tutor.email }).select('date startTime endTime -_id');
+  const bookings = await Booking.find({ tutorEmail: tutor.email }).select('date dateISO startTime endTime duration -_id');
   res.json(bookings);
 });
 
@@ -1045,6 +1130,22 @@ app.put('/api/tutors/me/zoom', requireAuth('tutor'), async (req, res) => {
   const tutor = await Tutor.findByIdAndUpdate(
     req.auth.userId,
     { zoomLink: (req.body.zoomLink || '').trim() },
+    { new: true },
+  ).select('-password');
+  res.json(tutor);
+});
+
+// The most hours of tutoring this tutor wants in a week. Whole or half
+// hours, 1-10; anything else is snapped to the nearest half hour and clamped.
+app.put('/api/tutors/me/max-hours', requireAuth('tutor'), async (req, res) => {
+  const raw = Number(req.body.maxHoursPerWeek);
+  if (!Number.isFinite(raw)) {
+    return res.status(400).json({ error: 'maxHoursPerWeek must be a number between 1 and 10.' });
+  }
+  const snapped = Math.min(MAX_WEEKLY_HOURS_CEILING, Math.max(1, Math.round(raw * 2) / 2));
+  const tutor = await Tutor.findByIdAndUpdate(
+    req.auth.userId,
+    { maxHoursPerWeek: snapped },
     { new: true },
   ).select('-password');
   res.json(tutor);

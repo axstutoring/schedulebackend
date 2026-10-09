@@ -32,6 +32,10 @@ const TutorSchema = new Schema({
   // Must be the tutor's UCLA-account Zoom room link. Only revealed to a
   // student once the tutor confirms an online session (see booking routes).
   zoomLink: { type: String, default: '' },
+  // Most hours of tutoring (pending + confirmed sessions) this tutor wants
+  // in a single week. 1-10 in half-hour steps; defaults to the 10-hour
+  // ceiling so existing tutors aren't capped until they choose to be.
+  maxHoursPerWeek: { type: Number, default: 10, min: 1, max: 10 },
   isAdmin: { type: Boolean, default: false },
   // Defaults true so admin-created tutors (POST /api/admin/tutors) are active
   // immediately; self-signup (POST /api/auth/tutor/signup) explicitly sets
